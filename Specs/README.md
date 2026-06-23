@@ -19,6 +19,17 @@ patterns wherever possible.
 - Prefer selectable TUI text over a copy button. Add a copy action only if terminal selection is not
   reliable for a specific field.
 
+## Testing Principle
+
+Tests should guard only the paths where users lose findings, cannot continue an audit, or could
+persist structured secrets to disk. Prefer coordinator, runner, and TUI helper tests with mocked
+runner/session-manager boundaries.
+
+Do not add terminal/Textual pilot end-to-end tests, numeric coverage gates, action-bar render tests,
+or standalone graph snapshot tests unless implementation risk justifies them. Do not add a manifest
+idempotency test while the manifest has a single writer by construction. Do not add an Escape-stop
+regression test unless the running/waiting stop path is modified.
+
 ## Specification Order
 
 1. `01-tui-failed-agent-recovery.md`

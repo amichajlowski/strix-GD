@@ -93,12 +93,14 @@ in the chosen Textual surface.
 Add focused tests before broad UI refactors. Prefer coordinator and TUI helper tests over full
 terminal integration where possible.
 
-1. `tests/test_agent_errors.py::test_record_error_persists_scrubbed_metadata`
+1. `tests/test_agent_errors.py::test_record_error_scrubs_structured_secret_patterns`
    - Create a coordinator and registered agent.
-   - Record exceptions containing Authorization/Bearer, cookie, password, JWT, and basic-auth URL
-     values.
-   - Assert `metadata[agent_id]["last_error"]` exists, structured secrets are `XXXX`, non-secret
-     text remains useful, and the message is length-bounded.
+   - Use one parametrised test covering the implemented structured-secret patterns:
+     Authorization/Bearer, Cookie/Set-Cookie, `api_key`/`token`/`password`/`secret`/`credential`
+     values, basic-auth URLs, JWT-shaped values, and common cloud key shapes.
+   - Include one negative case proving benign text and a normal file path remain readable.
+   - Assert `metadata[agent_id]["last_error"]` exists, secret cases contain `XXXX` but not the raw
+     secret, benign text remains useful, and the message is length-bounded.
 2. `tests/test_agent_errors.py::test_mark_running_clears_last_error`
    - Record an error.
    - Call `mark_running()`.
@@ -114,23 +116,25 @@ terminal integration where possible.
 5. `tests/test_tui_recovery.py::test_failed_status_renders_recovery_prompt`
    - Build failed agent data with `last_error`.
    - Assert the status display contains the exception type, message, and suggested fix.
-6. `tests/test_tui_recovery.py::test_retry_failed_agent_sends_retry_instruction`
+6. `tests/test_tui_recovery.py::test_retry_failed_agent_reruns_and_clears_last_error`
    - Select a failed agent with attached session.
    - Trigger retry.
-   - Assert `coordinator.send()` is called with a user instruction and the agent is wakeable.
+   - Assert `coordinator.send()` is called with a user instruction, `Runner.run_streamed()` or the
+     selected agent loop is invoked again, and `last_error` clears when the agent returns to
+     `running`.
 7. `tests/test_tui_recovery.py::test_save_for_resume_preserves_agent_state`
    - Trigger Save for resume.
    - Assert `run.json`, `.state/agents.json`, `.state/agents.db`, and findings remain.
-8. `tests/test_tui_recovery.py::test_cancel_keep_findings_removes_replay_state_only`
+8. `tests/test_report_state.py::test_paused_status_survives_stopped_cleanup`
+   - Set `run.json.status` to `paused`.
+   - Invoke the existing cleanup path with `status="stopped"`.
+   - Assert `run.json.status` remains `paused`.
+9. `tests/test_tui_recovery.py::test_cancel_keep_findings_status_blocks_resume`
    - Trigger Cancel, keep findings.
-   - Assert findings remain, `run.json.status` is `cancelled_findings_saved`, cleanup does not
-     downgrade the status, and agent replay state is absent or ignored on the next launch.
-9. `tests/test_tui_recovery.py::test_cancel_keep_findings_cannot_same_run_restart`
+   - Assert findings remain and `run.json.status` is `cancelled_findings_saved`.
+   - Assert cleanup does not downgrade the status and agent replay state is absent or ignored.
    - Cancel a run and then attempt `--resume`.
    - Assert Strix refuses same-run restart because `cancelled_findings_saved` is present.
-10. `tests/test_tui_recovery.py::test_save_for_resume_status_survives_cleanup`
-   - Save for resume and invoke the existing cleanup path.
-   - Assert `run.json.status` remains `paused`.
 
 ## Regression Checks
 

@@ -47,9 +47,10 @@ completion path.
 2. `tests/test_execution.py::test_failed_child_notifies_parent`
    - Trigger child `failed`.
    - Assert parent receives child id, status, and scrubbed error summary.
-3. `tests/test_execution.py::test_error_stopped_child_notifies_parent`
-   - Mark a child `stopped` with `last_error`.
-   - Assert parent is notified.
+3. `tests/test_execution.py::test_max_turns_stopped_child_notifies_parent`
+   - Drive the real `MaxTurnsExceeded` path through the child agent loop.
+   - Assert child status becomes `stopped`, metadata contains `last_error`, and the parent is
+     notified.
 4. `tests/test_execution.py::test_user_stopped_child_does_not_emit_error_message`
    - Stop a child through the normal graceful stop path without `last_error`.
    - Assert no terminal error message is sent.

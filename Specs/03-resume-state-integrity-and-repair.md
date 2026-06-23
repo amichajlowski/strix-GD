@@ -76,11 +76,7 @@ Add a simple repair path:
 6. `tests/test_agent_snapshots.py::test_snapshot_write_failure_sets_checkpoint_warning`
    - Mock filesystem write failure.
    - Assert coordinator/report warning is set and the running audit is not crashed by the warning.
-7. `tests/test_runner_resume.py::test_missing_agents_db_routes_to_root_only_same_run_restart`
-   - Provide valid snapshot and missing `agents.db`.
-   - Assert full SDK replay is not attempted, child respawn is skipped, and restart recovery is
-     offered.
-8. `tests/test_tui_recovery.py::test_tui_displays_checkpoint_warning`
+7. `tests/test_tui_recovery.py::test_tui_displays_checkpoint_warning`
    - Hydrate a checkpoint warning into TUI state.
    - Assert the warning appears without replacing agent status.
 

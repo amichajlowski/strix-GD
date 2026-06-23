@@ -40,8 +40,7 @@ copying excessive sandbox state.
    - known generated report files
    - workspace source mapping
    - sandbox cleanup status
-   Manifest writing must be idempotent and failures must be logged without blocking cleanup or
-   findings persistence.
+   Manifest failures must be logged without blocking cleanup or findings persistence.
 7. Add proxy history export only if the current Caido client API supports it with a small, direct
    call. Otherwise record the Caido project URL and leave implementation for a separate task.
 8. Scrub structured secrets in persisted evidence text using the shared helper. Keep source paths
@@ -66,14 +65,11 @@ copying excessive sandbox state.
 6. `tests/test_runtime_evidence.py::test_runner_finally_writes_evidence_manifest`
    - Mock a session bundle and cleanup.
    - Assert an evidence manifest is written by the runner before cleanup.
-7. `tests/test_runtime_evidence.py::test_evidence_manifest_is_idempotent`
-   - Invoke cleanup/finally paths more than once.
-   - Assert the manifest is not duplicated or corrupted.
-8. `tests/test_runtime_evidence.py::test_cleanup_manifest_scrubs_structured_secrets`
-   - Include token, cookie, and credential-like values in mocked evidence.
-   - Assert output contains `XXXX` instead of raw values.
-   - Assert source paths and workspace mappings remain readable.
-9. `tests/test_runtime_evidence.py::test_cleanup_failure_does_not_block_findings_save`
+7. `tests/test_runtime_evidence.py::test_evidence_manifest_uses_shared_secret_scrubber`
+   - Mock evidence text that passes through the shared structured-secret scrubber.
+   - Assert manifest output uses the shared helper rather than a second scrubber, and source paths
+     plus workspace mappings remain readable.
+8. `tests/test_runtime_evidence.py::test_cleanup_failure_does_not_block_findings_save`
    - Mock container deletion failure.
    - Assert findings and `run.json` are still present.
 
