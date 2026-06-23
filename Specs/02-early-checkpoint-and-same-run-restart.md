@@ -18,6 +18,7 @@ again under a new run.
 
 Create a usable checkpoint before sandbox startup and allow same-run restart when only the agent
 snapshot is missing.
+Use explicit runner modes: `fresh`, `resume`, and `same_run_restart`.
 
 ## Non-Goals
 
@@ -43,17 +44,24 @@ snapshot is missing.
 2. Initialise `AgentCoordinator`, set the snapshot path, register root, and snapshot before
    `session_manager.create_or_reuse()`.
 3. Ensure fresh runs do not double-register root after moving the registration earlier.
-4. If sandbox startup fails after the early checkpoint, record the error on the root metadata.
-5. Change the CLI resume gate for missing `agents.json`:
+4. Move `session_manager.create_or_reuse()` inside the protected `try` block so sandbox/Caido
+   startup failures can record root error metadata and run normal cleanup/report handling.
+5. If sandbox startup fails after the early checkpoint, record the error on the root metadata.
+6. Change the CLI resume gate for missing `agents.json`:
    - if `run.json` is missing or invalid, keep hard failure
-   - if `run.json` is valid, allow same-run restart
-6. Same-run restart should:
+   - if `run.json.status` is `cancelled_findings_saved`, refuse restart and tell the user to start
+     a fresh run
+   - if `run.json` is valid and not cancelled, allow same-run restart
+7. Same-run restart should:
    - keep the same run directory
    - preserve findings
    - create a new root SDK session if `agents.db` is absent
+   - restart root only when SDK history is unavailable; do not respawn children into empty sessions
    - add a recovery instruction explaining that previous agent history was unavailable
-7. Add a TUI action for "Restart same run" when the scan failed before session attachment.
-8. Add logging that distinguishes true resume from same-run restart.
+8. Add a TUI action for "Retry startup" / "Restart same run" when the scan failed before session
+   attachment. The action should start a new scan thread and re-enter `run_strix_scan()` for the
+   same run name rather than trying to message an agent in a closed event loop.
+9. Add logging that distinguishes `fresh`, `resume`, and `same_run_restart`.
 
 ## Test Cases
 
@@ -66,22 +74,31 @@ snapshot is missing.
    - Assert the coordinator snapshot contains exactly one root agent.
 3. `tests/test_runner_resume.py::test_startup_failure_records_root_error`
    - Mock sandbox startup failure.
-   - Assert root metadata contains `last_error` with the failure type and redacted message.
+   - Assert root metadata contains `last_error` with the failure type and scrubbed message.
 4. `tests/test_cli_resume.py::test_resume_missing_agents_json_with_valid_run_json_allows_restart`
    - Create `run.json` without `.state/agents.json`.
    - Parse `--resume`.
    - Assert args are populated from `run.json` and marked for same-run restart.
-5. `tests/test_cli_resume.py::test_resume_missing_run_json_still_fails`
+5. `tests/test_cli_resume.py::test_resume_cancelled_findings_saved_refuses_restart`
+   - Create `run.json` with status `cancelled_findings_saved` and no `agents.json`.
+   - Parse `--resume`.
+   - Assert same-run restart is refused with an actionable message.
+6. `tests/test_cli_resume.py::test_resume_missing_run_json_still_fails`
    - Run `--resume` for a missing run.
    - Assert parser error remains.
-6. `tests/test_runner_resume.py::test_same_run_restart_preserves_existing_findings`
+7. `tests/test_runner_resume.py::test_same_run_restart_preserves_existing_findings`
    - Create prior `vulnerabilities.json`.
    - Restart same run.
    - Assert the next report id does not overwrite previous findings.
-7. `tests/test_runner_resume.py::test_same_run_restart_creates_new_sdk_session_when_db_missing`
-   - Create valid `run.json` and missing `agents.db`.
+8. `tests/test_runner_resume.py::test_same_run_restart_creates_root_only_session_when_db_missing`
+   - Create valid `run.json`, valid `agents.json` with children, and missing `agents.db`.
    - Run same-run restart path.
-   - Assert a new root session is opened and a recovery instruction is inserted.
+   - Assert a new root session is opened, a recovery instruction is inserted, and child agents are
+     not respawned into empty sessions.
+9. `tests/test_tui_recovery.py::test_retry_startup_restarts_scan_thread`
+   - Mock sandbox startup failure in TUI mode.
+   - Trigger Retry startup.
+   - Assert a new scan thread is started for the same run name.
 
 ## Regression Checks
 
@@ -89,5 +106,6 @@ snapshot is missing.
 - Normal `--resume` with valid `agents.json` and `agents.db` still replays SDK history.
 - Missing `run.json` remains a hard resume failure.
 - Missing `agents.json` with valid `run.json` becomes repairable.
+- `cancelled_findings_saved` is not repairable through same-run restart.
 - Existing findings are not renumbered or overwritten.
 - Sandbox startup failures produce a visible root error record.

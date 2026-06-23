@@ -28,11 +28,14 @@ completion path.
 
 1. Rename `_notify_parent_on_crash()` to `_notify_parent_on_terminal_error()`.
 2. Notify the parent for `failed`, `crashed`, and error-driven `stopped`.
-3. Include child id, name, status, redacted error message, and a short suggested parent action.
+   Error-driven `stopped` means status `stopped` plus a `last_error` record.
+3. Include child id, name, status, scrubbed error message, and a short suggested parent action.
 4. Do not notify for normal `completed`.
 5. Do not notify for deliberate user stop unless the stop has an attached error record.
 6. In `_start_child_runner()`, catch unexpected child loop exceptions, record structured error,
    mark the child `crashed`, notify the parent, and swallow the exception after logging.
+   Catch `BudgetExceededError` before any broad exception handler so budget stop remains a clean
+   scan-wide stop.
 7. Ensure parent wake-up uses existing `coordinator.send()` so it works with current pending message
    counts.
 
@@ -43,7 +46,7 @@ completion path.
    - Assert parent pending count increases and message type is terminal error.
 2. `tests/test_execution.py::test_failed_child_notifies_parent`
    - Trigger child `failed`.
-   - Assert parent receives child id, status, and redacted error summary.
+   - Assert parent receives child id, status, and scrubbed error summary.
 3. `tests/test_execution.py::test_error_stopped_child_notifies_parent`
    - Mark a child `stopped` with `last_error`.
    - Assert parent is notified.
@@ -58,9 +61,13 @@ completion path.
    - Raise `BudgetExceededError` from child loop.
    - Assert budget handling remains clean and parent does not receive a misleading failure message.
 7. `tests/test_agents_graph.py::test_parent_wait_unblocks_on_child_failure_message`
-   - Parent waits for child.
+   - Parent waits for child in interactive mode.
    - Trigger child terminal error notification.
    - Assert `wait_for_message()` returns without waiting for timeout.
+8. `tests/test_agents_graph.py::test_noninteractive_parent_wait_unblocks_on_child_failure_message`
+   - Parent waits through the `wait_for_message` tool in non-interactive mode.
+   - Trigger child terminal error notification.
+   - Assert the tool returns without waiting for its timeout.
 
 ## Regression Checks
 
