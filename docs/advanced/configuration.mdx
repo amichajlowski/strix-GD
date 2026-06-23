@@ -27,6 +27,18 @@ Configure Strix using environment variables or a config file.
   Maximum number of retries for LLM API calls on transient failures.
 </ParamField>
 
+<ParamField path="STRIX_LLM_RETRY_INITIAL_DELAY" default="2.0" type="float">
+  Initial delay, in seconds, before the first retry.
+</ParamField>
+
+<ParamField path="STRIX_LLM_RETRY_MAX_DELAY" default="90.0" type="float">
+  Maximum retry delay, in seconds, when exponential backoff increases.
+</ParamField>
+
+<ParamField path="STRIX_LLM_RETRY_MULTIPLIER" default="2.0" type="float">
+  Multiplier applied to each retry delay.
+</ParamField>
+
 <ParamField path="STRIX_REASONING_EFFORT" default="high" type="string">
   Control thinking effort for reasoning models. Valid values: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`. Defaults to `medium` for quick scan mode.
 </ParamField>
@@ -108,6 +120,10 @@ strix --target ./app --config /path/to/config.json
   "env": {
     "STRIX_LLM": "openai/gpt-5.4",
     "LLM_API_KEY": "sk-...",
+    "STRIX_LLM_MAX_RETRIES": "5",
+    "STRIX_LLM_RETRY_INITIAL_DELAY": "2",
+    "STRIX_LLM_RETRY_MAX_DELAY": "90",
+    "STRIX_LLM_RETRY_MULTIPLIER": "2",
     "STRIX_REASONING_EFFORT": "high"
   }
 }
@@ -125,6 +141,10 @@ export PERPLEXITY_API_KEY="pplx-..."
 
 # Optional: Custom timeouts
 export LLM_TIMEOUT="600"
+export STRIX_LLM_MAX_RETRIES="8"
+export STRIX_LLM_RETRY_INITIAL_DELAY="3"
+export STRIX_LLM_RETRY_MAX_DELAY="120"
+export STRIX_LLM_RETRY_MULTIPLIER="2"
 export STRIX_SANDBOX_EXECUTION_TIMEOUT="300"
 
 ```

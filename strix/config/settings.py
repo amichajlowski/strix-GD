@@ -37,6 +37,14 @@ class LlmSettings(BaseSettings):
     )
     reasoning_effort: ReasoningEffort = Field(default="high", alias="STRIX_REASONING_EFFORT")
     timeout: int = Field(default=300, alias="LLM_TIMEOUT")
+    max_retries: int = Field(default=5, ge=0, alias="STRIX_LLM_MAX_RETRIES")
+    retry_initial_delay: float = Field(
+        default=2.0,
+        ge=0,
+        alias="STRIX_LLM_RETRY_INITIAL_DELAY",
+    )
+    retry_max_delay: float = Field(default=90.0, ge=0, alias="STRIX_LLM_RETRY_MAX_DELAY")
+    retry_multiplier: float = Field(default=2.0, gt=0, alias="STRIX_LLM_RETRY_MULTIPLIER")
 
 
 class RuntimeSettings(BaseSettings):

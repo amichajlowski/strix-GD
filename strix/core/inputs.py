@@ -8,10 +8,12 @@ from typing import TYPE_CHECKING, Any
 from agents.model_settings import ModelSettings
 from openai.types.shared import Reasoning
 
-from strix.config.models import DEFAULT_MODEL_RETRY, model_supports_reasoning
+from strix.config.models import model_supports_reasoning
 
 
 if TYPE_CHECKING:
+    from agents.retry import ModelRetrySettings
+
     from strix.config.settings import ReasoningEffort
 
 
@@ -111,10 +113,11 @@ def make_model_settings(
     reasoning_effort: ReasoningEffort | None,
     *,
     model_name: str,
+    retry_settings: ModelRetrySettings,
 ) -> ModelSettings:
     model_settings = ModelSettings(
         parallel_tool_calls=False,
-        retry=DEFAULT_MODEL_RETRY,
+        retry=retry_settings,
         include_usage=True,
     )
     if (

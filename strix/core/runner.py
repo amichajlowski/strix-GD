@@ -17,6 +17,7 @@ from strix.config import load_settings
 from strix.config.models import (
     StrixProvider,
     configure_sdk_model_defaults,
+    model_retry_settings_from_config,
     uses_chat_completions_tool_schema,
 )
 from strix.core.agents import AgentCoordinator
@@ -157,6 +158,7 @@ async def run_strix_scan(
         model_settings = make_model_settings(
             settings.llm.reasoning_effort,
             model_name=resolved_model,
+            retry_settings=model_retry_settings_from_config(settings),
         )
         run_config = RunConfig(
             model=resolved_model,

@@ -232,6 +232,10 @@ export LLM_API_KEY="your-api-key"
 export LLM_API_BASE="your-api-base-url"  # if using a local model, e.g. Ollama, LMStudio
 export PERPLEXITY_API_KEY="your-api-key"  # for search capabilities
 export STRIX_REASONING_EFFORT="high"  # control thinking effort (default: high, quick scan: medium)
+export STRIX_LLM_MAX_RETRIES="5"  # retry transient LLM/API failures
+export STRIX_LLM_RETRY_INITIAL_DELAY="2"  # first retry delay in seconds
+export STRIX_LLM_RETRY_MAX_DELAY="90"  # maximum retry delay in seconds
+export STRIX_LLM_RETRY_MULTIPLIER="2"  # exponential backoff multiplier
 ```
 
 > [!NOTE]

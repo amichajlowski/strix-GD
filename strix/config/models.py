@@ -44,20 +44,46 @@ class StrixProvider(MultiProvider):
         return self._get_fallback_provider("litellm"), original_model_name
 
 
-DEFAULT_MODEL_RETRY = ModelRetrySettings(
+def _build_model_retry_settings(
+    *,
+    max_retries: int,
+    initial_delay: float,
+    max_delay: float,
+    multiplier: float,
+) -> ModelRetrySettings:
+    return ModelRetrySettings(
+        max_retries=max_retries,
+        backoff=ModelRetryBackoffSettings(
+            initial_delay=initial_delay,
+            max_delay=max_delay,
+            multiplier=multiplier,
+            jitter=False,
+        ),
+        policy=retry_policies.any(
+            retry_policies.provider_suggested(),
+            retry_policies.network_error(),
+            retry_policies.http_status((429, 500, 502, 503, 504)),
+        ),
+    )
+
+
+DEFAULT_MODEL_RETRY = _build_model_retry_settings(
     max_retries=5,
-    backoff=ModelRetryBackoffSettings(
-        initial_delay=2.0,
-        max_delay=90.0,
-        multiplier=2.0,
-        jitter=False,
-    ),
-    policy=retry_policies.any(
-        retry_policies.provider_suggested(),
-        retry_policies.network_error(),
-        retry_policies.http_status((429, 500, 502, 503, 504)),
-    ),
+    initial_delay=2.0,
+    max_delay=90.0,
+    multiplier=2.0,
 )
+
+
+def model_retry_settings_from_config(settings: Settings) -> ModelRetrySettings:
+    """Build SDK retry settings from resolved Strix configuration."""
+    llm = settings.llm
+    return _build_model_retry_settings(
+        max_retries=llm.max_retries,
+        initial_delay=llm.retry_initial_delay,
+        max_delay=llm.retry_max_delay,
+        multiplier=llm.retry_multiplier,
+    )
 
 
 def configure_sdk_model_defaults(settings: Settings) -> None:

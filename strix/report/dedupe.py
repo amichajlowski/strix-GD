@@ -12,9 +12,9 @@ from openai.types.responses import ResponseOutputMessage
 
 from strix.config import load_settings
 from strix.config.models import (
-    DEFAULT_MODEL_RETRY,
     StrixProvider,
     configure_sdk_model_defaults,
+    model_retry_settings_from_config,
 )
 from strix.report.state import get_global_report_state
 
@@ -192,7 +192,10 @@ async def check_duplicate(
         response = await model.get_response(
             system_instructions=DEDUPE_SYSTEM_PROMPT,
             input=user_msg,
-            model_settings=ModelSettings(retry=DEFAULT_MODEL_RETRY, include_usage=True),
+            model_settings=ModelSettings(
+                retry=model_retry_settings_from_config(settings),
+                include_usage=True,
+            ),
             tools=[],
             output_schema=None,
             handoffs=[],
