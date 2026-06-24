@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 
 _global_report_state: Optional["ReportState"] = None
 
+# Run-level recovery statuses that must survive a later generic cleanup.
+PAUSED_STATUS = "paused"
+CANCELLED_FINDINGS_SAVED_STATUS = "cancelled_findings_saved"
+_PROTECTED_RECOVERY_STATUSES = frozenset({PAUSED_STATUS, CANCELLED_FINDINGS_SAVED_STATUS})
+
 
 def get_global_report_state() -> Optional["ReportState"]:
     return _global_report_state
@@ -292,7 +297,12 @@ class ReportState:
             self.run_record["status"] = "completed"
         elif status and self.run_record.get("status") != "completed":
             current_status = self.run_record.get("status")
-            if status == "stopped" and current_status in {"failed", "interrupted"}:
+            # paused / cancelled_findings_saved are deliberate recovery states;
+            # a later cleanup(status="stopped"/"interrupted") must never downgrade
+            # them or resume/restart gates would misread the run.
+            if current_status in _PROTECTED_RECOVERY_STATUSES:
+                status = str(current_status)
+            elif status == "stopped" and current_status in {"failed", "interrupted"}:
                 status = str(current_status)
             if self.end_time is None:
                 self.end_time = datetime.now(UTC).isoformat()

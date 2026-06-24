@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -42,3 +43,102 @@ async def test_wait_for_message_returns_immediately_after_budget_stop() -> None:
 
     # No pending messages, but the stop flag short-circuits the wait.
     await asyncio.wait_for(coordinator.wait_for_message("agent"), timeout=1.0)
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.items: list[Any] = []
+
+    async def add_items(self, items: list[Any]) -> None:
+        self.items.extend(items)
+
+    async def get_items(self) -> list[Any]:
+        return list(self.items)
+
+
+@pytest.mark.asyncio
+async def test_interactive_root_failure_parks_without_reraising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from strix.core import execution
+
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+
+    def boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("kaboom upstream failure")
+
+    monkeypatch.setattr(execution.Runner, "run_streamed", boom)
+
+    result = await execution._run_cycle(
+        object(),
+        coordinator,
+        "root",
+        input_data="task",
+        run_config=object(),
+        context={"parent_id": None},
+        max_turns=5,
+        session=None,
+        interactive=True,
+        event_sink=None,
+        hooks=None,
+    )
+
+    assert result is None
+    assert coordinator.statuses["root"] in {"failed", "crashed"}
+    assert "last_error" in coordinator.metadata["root"]
+
+
+@pytest.mark.asyncio
+async def test_failed_child_notifies_parent(monkeypatch: pytest.MonkeyPatch) -> None:
+    from strix.core import execution
+
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+    await coordinator.register("child", "recon", parent_id="root")
+    coordinator.runtimes["root"].session = _FakeSession()  # parent inbox
+
+    from agents.exceptions import UserError
+
+    def boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise UserError("bad child input api_key=supersecretvalue")
+
+    monkeypatch.setattr(execution.Runner, "run_streamed", boom)
+
+    await execution._run_cycle(
+        object(),
+        coordinator,
+        "child",
+        input_data="task",
+        run_config=object(),
+        context={"parent_id": "root"},
+        max_turns=5,
+        session=None,
+        interactive=True,
+        event_sink=None,
+        hooks=None,
+    )
+
+    assert coordinator.statuses["child"] == "failed"
+    assert coordinator.pending_counts["root"] == 1
+    parent_msg = coordinator.runtimes["root"].session.items[-1]
+    text = parent_msg["content"]
+    assert "child" in text
+    assert "supersecretvalue" not in text  # scrubbed
+
+
+@pytest.mark.asyncio
+async def test_user_stopped_child_does_not_emit_error_message() -> None:
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+    await coordinator.register("child", "recon", parent_id="root")
+    coordinator.runtimes["root"].session = _FakeSession()
+
+    from strix.core.execution import _notify_parent_on_terminal_error
+
+    # Graceful user stop: no last_error attached.
+    await coordinator.set_status("child", "stopped")
+    await _notify_parent_on_terminal_error(coordinator, "child", "stopped")
+
+    assert coordinator.pending_counts.get("root", 0) == 0
+    assert coordinator.runtimes["root"].session.items == []

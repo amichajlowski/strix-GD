@@ -33,6 +33,7 @@ from textual.widgets.tree import TreeNode
 from strix.config import load_settings
 from strix.core.hooks import BudgetExceededError
 from strix.core.runner import run_strix_scan
+from strix.interface.tui import recovery
 from strix.interface.tui.live_view import TuiLiveView
 from strix.interface.tui.messages import send_user_message_to_agent
 from strix.interface.tui.renderers import render_tool_widget
@@ -671,6 +672,53 @@ class QuitScreen(ModalScreen):  # type: ignore[misc]
             self.app.pop_screen()
 
 
+class RecoveryScreen(ModalScreen):  # type: ignore[misc]
+    """Recovery options for a failed / crashed / error-stopped agent."""
+
+    def __init__(self, agent_name: str, agent_id: str, agent_data: dict[str, Any]) -> None:
+        super().__init__()
+        self.agent_name = agent_name
+        self.agent_id = agent_id
+        self.agent_data = agent_data
+
+    def compose(self) -> ComposeResult:
+        yield Grid(
+            VerticalScroll(Static(self._render(), id="recovery_content"), id="recovery_scroll"),
+            Horizontal(
+                Button("Retry", variant="primary", id="recovery_retry"),
+                Button("Save for resume", variant="default", id="recovery_save"),
+                Button("Cancel, keep findings", variant="error", id="recovery_cancel"),
+                Button("Close", variant="default", id="recovery_close"),
+                id="recovery_buttons",
+            ),
+            id="recovery_dialog",
+        )
+
+    def _render(self) -> Text:
+        text = Text()
+        text.append(f"Recover '{self.agent_name}' ({self.agent_id})\n\n", style="bold")
+        text.append_text(recovery.render_recovery_details(self.agent_data))
+        return text
+
+    def on_mount(self) -> None:
+        self.query_one("#recovery_close", Button).focus()
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            self.app.pop_screen()
+            event.prevent_default()
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id
+        self.app.pop_screen()
+        if button_id == "recovery_retry":
+            self.app.recovery_retry(self.agent_id, self.agent_data)
+        elif button_id == "recovery_save":
+            await self.app.recovery_save_for_resume()
+        elif button_id == "recovery_cancel":
+            await self.app.recovery_cancel_keep_findings()
+
+
 class StrixTUIApp(App):  # type: ignore[misc]
     CSS_PATH = str(Path(__file__).resolve().parent.parent / "assets" / "tui_styles.tcss")
     ALLOW_SELECT = True
@@ -922,23 +970,33 @@ class StrixTUIApp(App):  # type: ignore[misc]
             else:
                 self._agent_graph_sync_future = None
                 try:
-                    parent_of, statuses, names = future.result()
+                    parent_of, statuses, names, metadata, checkpoint_warning = future.result()
                 except Exception:
                     logger.exception("TUI agent graph sync failed")
                 else:
                     for agent_id, status in statuses.items():
+                        md = metadata.get(agent_id) or {}
+                        last_error = md.get("last_error")
                         self.live_view.upsert_agent(
                             agent_id,
                             name=names.get(agent_id, agent_id),
                             parent_id=parent_of.get(agent_id),
                             status=status,
+                            last_error=last_error if isinstance(last_error, dict) else None,
+                            checkpoint_warning=checkpoint_warning,
                         )
 
         if self._scan_loop is None or self._scan_loop.is_closed():
             return
 
-        async def collect() -> tuple[dict[str, str | None], dict[str, Any], dict[str, str]]:
-            return await self.coordinator.graph_snapshot()
+        async def collect() -> tuple[
+            dict[str, str | None],
+            dict[str, Any],
+            dict[str, str],
+            dict[str, dict[str, Any]],
+            str | None,
+        ]:
+            return await self.coordinator.graph_snapshot_with_metadata()
 
         self._agent_graph_sync_future = asyncio.run_coroutine_threadsafe(collect(), self._scan_loop)
 
@@ -956,6 +1014,7 @@ class StrixTUIApp(App):  # type: ignore[misc]
                 "waiting": "⏸",
                 "completed": "🟢",
                 "failed": "🔴",
+                "crashed": "🔴",
                 "stopped": "■",
             }
 
@@ -1122,6 +1181,10 @@ class StrixTUIApp(App):  # type: ignore[misc]
                 t.append(action, style="dim")
             return t
 
+        if recovery.is_error_state(agent_data):
+            self._stop_dot_animation()
+            return (recovery.render_recovery_status(agent_data), Text(), False)
+
         simple_statuses: dict[str, tuple[str, str]] = {
             "stopped": ("Agent stopped", ""),
             "completed": ("Agent completed", ""),
@@ -1131,16 +1194,6 @@ class StrixTUIApp(App):  # type: ignore[misc]
             msg, _ = simple_statuses[status]
             text = Text()
             text.append(msg)
-            return (text, Text(), False)
-
-        if status == "failed":
-            error_msg = agent_data.get("error_message", "")
-            text = Text()
-            if error_msg:
-                text.append(error_msg, style="red")
-            else:
-                text.append("Scan failed", style="red")
-            self._stop_dot_animation()
             return (text, Text(), False)
 
         if status == "waiting":
@@ -1438,6 +1491,7 @@ class StrixTUIApp(App):  # type: ignore[misc]
             "waiting": "⏸",
             "completed": "🟢",
             "failed": "🔴",
+            "crashed": "🔴",
             "stopped": "■",
         }
 
@@ -1483,6 +1537,7 @@ class StrixTUIApp(App):  # type: ignore[misc]
             "waiting": "⏸",
             "completed": "🟢",
             "failed": "🔴",
+            "crashed": "🔴",
             "stopped": "■",
         }
 
@@ -1667,13 +1722,19 @@ class StrixTUIApp(App):  # type: ignore[misc]
         if not self.selected_agent_id:
             return
 
-        agent_name, should_stop = self._validate_agent_for_stopping()
-        if not should_stop:
-            return
-
         try:
             self.query_one("#main_container")
         except (ValueError, Exception):
+            return
+
+        agent_data = self.live_view.agents.get(self.selected_agent_id)
+        if agent_data and recovery.is_error_state(agent_data):
+            agent_name = agent_data.get("name", "Unknown Agent")
+            self.push_screen(RecoveryScreen(agent_name, self.selected_agent_id, agent_data))
+            return
+
+        agent_name, should_stop = self._validate_agent_for_stopping()
+        if not should_stop:
             return
 
         self.push_screen(StopAgentScreen(agent_name, self.selected_agent_id))
@@ -1710,6 +1771,36 @@ class StrixTUIApp(App):  # type: ignore[misc]
             self.coordinator.cancel_descendants_graceful(agent_id),
             self._scan_loop,
         )
+
+    def recovery_retry(self, agent_id: str, agent_data: dict[str, Any]) -> None:
+        message = recovery.build_retry_message(agent_data.get("last_error"))
+        submitted = send_user_message_to_agent(
+            coordinator=self.coordinator,
+            loop=self._scan_loop,
+            live_view=self.live_view,
+            target_agent_id=agent_id,
+            message=message,
+        )
+        if not submitted:
+            self.notify("Scan loop is not ready; retry was not sent", severity="warning")
+            return
+        logger.info("TUI: retry instruction sent to %s", agent_id)
+        self._displayed_events.clear()
+        self._update_chat_view()
+
+    async def recovery_save_for_resume(self) -> None:
+        recovery.save_for_resume(self.report_state)
+        self.notify("State saved. Resume later with --resume.", timeout=3)
+        await self.action_custom_quit()
+
+    async def recovery_cancel_keep_findings(self) -> None:
+        recovery.cancel_keep_findings(
+            self.report_state,
+            self.coordinator,
+            self.report_state.get_run_dir(),
+        )
+        self.notify("Findings saved; agent replay state discarded.", timeout=3)
+        await self.action_custom_quit()
 
     async def action_custom_quit(self) -> None:
         self._fire_sandbox_cleanup()

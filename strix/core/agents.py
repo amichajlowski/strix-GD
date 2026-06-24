@@ -52,6 +52,10 @@ class AgentCoordinator:
     def set_snapshot_path(self, path: Path) -> None:
         self._snapshot_path = path
 
+    def disable_snapshots(self) -> None:
+        """Stop writing resume snapshots (used when abandoning replay state)."""
+        self._snapshot_path = None
+
     def mark_shutting_down(self) -> None:
         self.is_shutting_down = True
 

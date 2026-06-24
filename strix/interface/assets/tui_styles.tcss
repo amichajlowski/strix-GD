@@ -204,6 +204,61 @@ VulnerabilityDetailScreen {
     border: none;
 }
 
+#recovery_dialog {
+    grid-size: 1;
+    grid-gutter: 1;
+    grid-rows: 1fr auto;
+    padding: 2 3;
+    width: 80%;
+    max-width: 100;
+    height: auto;
+    max-height: 40;
+    border: solid #ea580c;
+    background: #0a0a0a;
+}
+
+#recovery_scroll {
+    height: 1fr;
+    background: transparent;
+    scrollbar-background: #0a0a0a;
+    scrollbar-color: #404040;
+    scrollbar-corner-color: #0a0a0a;
+    scrollbar-size: 1 1;
+    padding-right: 1;
+}
+
+#recovery_content {
+    width: 100%;
+    background: transparent;
+    padding: 0;
+}
+
+#recovery_buttons {
+    width: 100%;
+    height: auto;
+    align: right middle;
+    padding-top: 1;
+    border-top: solid #1a1a1a;
+}
+
+#recovery_buttons Button {
+    width: auto;
+    min-width: 10;
+    height: auto;
+    background: transparent;
+    color: #a3a3a3;
+    border: none;
+    text-style: none;
+    margin: 0 1;
+    padding: 0 2;
+}
+
+#recovery_buttons Button:hover, #recovery_buttons Button:focus {
+    background: transparent;
+    color: #ffffff;
+    border: none;
+}
+
 #chat_area_container {
     width: 80%;
     background: transparent;

@@ -34,16 +34,20 @@ class TuiLiveView:
         statuses = agents_data.get("statuses") or {}
         names = agents_data.get("names") or {}
         parent_of = agents_data.get("parent_of") or {}
+        metadata = agents_data.get("metadata") or {}
         if not isinstance(statuses, dict):
             return
         for agent_id, status in statuses.items():
             if not isinstance(agent_id, str):
                 continue
+            md = metadata.get(agent_id) if isinstance(metadata, dict) else None
+            last_error = md.get("last_error") if isinstance(md, dict) else None
             self.upsert_agent(
                 agent_id,
                 name=names.get(agent_id, agent_id) if isinstance(names, dict) else agent_id,
                 parent_id=parent_of.get(agent_id) if isinstance(parent_of, dict) else None,
                 status=str(status),
+                last_error=last_error if isinstance(last_error, dict) else None,
             )
         self._hydrate_sdk_session_history(run_dir, statuses.keys())
 
@@ -63,6 +67,8 @@ class TuiLiveView:
         parent_id: str | None = None,
         status: str | None = None,
         error_message: str | None = None,
+        last_error: dict[str, Any] | None = None,
+        checkpoint_warning: str | None = None,
     ) -> None:
         now = datetime.now(UTC).isoformat()
         current = self.agents.setdefault(
@@ -82,8 +88,14 @@ class TuiLiveView:
             current["parent_id"] = parent_id
         if status is not None:
             current["status"] = status
-        if error_message:
+        if last_error:
+            current["last_error"] = last_error
+            # Keep a flat message for the existing status display fallback.
+            current["error_message"] = last_error.get("message") or error_message
+        elif error_message:
             current["error_message"] = error_message
+        if checkpoint_warning is not None:
+            current["checkpoint_warning"] = checkpoint_warning
         current["updated_at"] = now
 
     def record_user_message(self, agent_id: str, content: str) -> None:

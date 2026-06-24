@@ -316,12 +316,14 @@ async def _run_noninteractive_until_lifecycle(
         )
 
         if invalid_final_outputs >= invalid_final_output_limit:
-            await coordinator.set_status(agent_id, "crashed")
-            await _notify_parent_on_crash(coordinator, agent_id, "crashed")
-            raise MaxTurnsExceeded(
+            exhausted = MaxTurnsExceeded(
                 "Agent exhausted non-interactive recovery attempts without calling "
                 "finish_scan or agent_finish."
             )
+            await coordinator.record_error(agent_id, exhausted)
+            await coordinator.set_status(agent_id, "crashed")
+            await _notify_parent_on_terminal_error(coordinator, agent_id, "crashed")
+            raise exhausted
 
         input_data = await _append_noninteractive_tool_required_message(
             session=session,
@@ -426,10 +428,15 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
             else:
                 status = "crashed"
             logger.exception("agent run failed for %s; parking as %s", agent_id, status)
+            # Record the structured error before flipping status so the TUI and
+            # any resume path see a scrubbed cause for this terminal state.
+            await coordinator.record_error(agent_id, exc)
             await coordinator.set_status(agent_id, status)
-            await _notify_parent_on_crash(coordinator, agent_id, status)
-            if context.get("parent_id") is None and status in {"failed", "crashed"}:
-                raise
+            await _notify_parent_on_terminal_error(coordinator, agent_id, status)
+            # Interactive root failures are parked, not re-raised: re-raising
+            # tears down the scan loop so the TUI can no longer retry/resume the
+            # root. Keep the loop alive; the outer wait_for_message lets a retry
+            # instruction wake the parked root.
             return None
         else:
             await _settle_run_result(coordinator, agent_id, interactive)
@@ -493,27 +500,40 @@ async def _append_noninteractive_tool_required_message(
     return []
 
 
-async def _notify_parent_on_crash(
+async def _notify_parent_on_terminal_error(
     coordinator: AgentCoordinator,
     agent_id: str,
     status: str,
 ) -> None:
-    if status != "crashed":
+    """Wake the parent when a child hits a terminal error.
+
+    Notifies for ``failed``, ``crashed``, and error-driven ``stopped`` (status
+    ``stopped`` plus a ``last_error`` record). Stays silent for normal
+    ``completed`` and for a deliberate user stop without an attached error.
+    """
+    if status not in {"failed", "crashed", "stopped"}:
         return
     async with coordinator._lock:
         parent = coordinator.parent_of.get(agent_id)
         name = coordinator.names.get(agent_id, agent_id)
+        last_error = coordinator.metadata.get(agent_id, {}).get("last_error")
     if parent is None:
         return
+    if status == "stopped" and not last_error:
+        # Deliberate graceful stop, not an error — don't alarm the parent.
+        return
+    err_type = (last_error or {}).get("type", "error")
+    err_msg = (last_error or {}).get("message", "")
     await coordinator.send(
         parent,
         {
             "from": agent_id,
-            "type": "crash",
+            "type": "terminal_error",
             "priority": "high",
             "content": (
-                f"[Agent crash] {name} ({agent_id}) terminated unexpectedly. "
-                "Stop waiting on this child unless you want to message it again."
+                f"[Agent {status}] {name} ({agent_id}) hit a terminal error "
+                f"({err_type}): {err_msg}. Stop waiting on this child; decide "
+                "whether to retry it, reassign its task, or continue without it."
             ),
         },
     )
@@ -569,7 +589,18 @@ async def _start_child_runner(
                 hooks=hooks,
             )
         except BudgetExceededError:
+            # Caught before the broad handler so a budget stop stays a clean
+            # scan-wide shutdown, never a child "failure" notification.
             logger.info("child %s stopped after reaching the scan budget limit", child_id)
+        except Exception as exc:
+            # Non-interactive child loops re-raise on terminal error; catch it so
+            # the parent is notified and the detached task doesn't leak an
+            # unretrieved exception.
+            logger.exception("child %s loop crashed unexpectedly", child_id)
+            with contextlib.suppress(Exception):
+                await coordinator.record_error(child_id, exc)
+                await coordinator.set_status(child_id, "crashed")
+                await _notify_parent_on_terminal_error(coordinator, child_id, "crashed")
 
     task_handle = asyncio.create_task(_child_loop(), name=f"agent-{name}-{child_id}")
     await coordinator.attach_runtime(child_id, task=task_handle)
