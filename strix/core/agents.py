@@ -7,8 +7,11 @@ import json
 import logging
 import tempfile
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
+
+from strix.core.scrubbing import scrub_message
 
 
 if TYPE_CHECKING:
@@ -44,6 +47,7 @@ class AgentCoordinator:
         self._snapshot_path: Path | None = None
         self.is_shutting_down = False
         self._budget_stopped = False
+        self.checkpoint_warning: str | None = None
 
     def set_snapshot_path(self, path: Path) -> None:
         self._snapshot_path = path
@@ -105,7 +109,51 @@ class AgentCoordinator:
         async with self._lock:
             if agent_id in self.statuses:
                 self.statuses[agent_id] = "running"
+            md = self.metadata.get(agent_id)
+            if md is not None:
+                md.pop("last_error", None)
         await self._maybe_snapshot()
+
+    async def record_error(
+        self,
+        agent_id: str,
+        exc: BaseException,
+        *,
+        cause: str | None = None,
+        suggested_fix: str | None = None,
+        recoverable: bool = True,
+    ) -> None:
+        """Store a bounded, scrubbed ``last_error`` record on agent metadata.
+
+        Captures only the exception type, status code when present, and a
+        scrubbed/bounded message prefix — never full provider responses,
+        request bodies, headers, cookies, or raw credentials.
+        """
+        record: dict[str, Any] = {
+            "type": type(exc).__name__,
+            "message": scrub_message(str(exc)),
+            "recoverable": recoverable,
+            "occurred_at": datetime.now(UTC).isoformat(),
+        }
+        status_code = getattr(exc, "status_code", None)
+        if isinstance(status_code, int):
+            record["status_code"] = status_code
+        if cause:
+            record["cause"] = scrub_message(cause)
+        if suggested_fix:
+            record["suggested_fix"] = scrub_message(suggested_fix)
+        async with self._lock:
+            md = self.metadata.get(agent_id)
+            if md is not None:
+                md["last_error"] = record
+        logger.info("agent.error %s type=%s", agent_id, record["type"])
+        await self._maybe_snapshot()
+
+    async def clear_error(self, agent_id: str) -> None:
+        async with self._lock:
+            md = self.metadata.get(agent_id)
+            if md is not None:
+                md.pop("last_error", None)
 
     async def park_waiting(self, agent_id: str) -> None:
         await self.set_status(agent_id, "waiting")
@@ -246,6 +294,26 @@ class AgentCoordinator:
     ) -> tuple[dict[str, str | None], dict[str, Status], dict[str, str]]:
         async with self._lock:
             return dict(self.parent_of), dict(self.statuses), dict(self.names)
+
+    async def graph_snapshot_with_metadata(
+        self,
+    ) -> tuple[
+        dict[str, str | None],
+        dict[str, Status],
+        dict[str, str],
+        dict[str, dict[str, Any]],
+        str | None,
+    ]:
+        """Like :meth:`graph_snapshot` but also carries agent metadata
+        (including ``last_error``) and the current checkpoint warning."""
+        async with self._lock:
+            return (
+                dict(self.parent_of),
+                dict(self.statuses),
+                dict(self.names),
+                {aid: dict(md) for aid, md in self.metadata.items()},
+                self.checkpoint_warning,
+            )
 
     def _message_to_session_item(self, message: dict[str, Any]) -> TResponseInputItem:
         sender = str(message.get("from", "unknown"))
