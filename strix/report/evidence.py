@@ -32,7 +32,6 @@ def write_evidence_manifest(
     run_dir: Path,
     local_sources: list[dict[str, Any]],
     caido_url: str | None = None,
-    caido_export_path: str | None = None,
     sandbox_cleanup: str = "pending",
 ) -> None:
     """Write ``evidence_manifest.json`` under ``run_dir``.
@@ -56,8 +55,6 @@ def write_evidence_manifest(
         }
         if caido_url:
             manifest["caido_url"] = caido_url
-        if caido_export_path:
-            manifest["caido_export_path"] = caido_export_path
 
         # Scrub via the shared helper (no second scrubber). Round-trips through
         # JSON so any credential embedded in a URL/value becomes XXXX while
