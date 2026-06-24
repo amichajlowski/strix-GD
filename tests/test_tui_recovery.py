@@ -41,7 +41,7 @@ def test_graph_sync_hydrates_error_metadata() -> None:
     assert agent["error_message"] == "boom upstream"
 
 
-def test_failed_status_renders_recovery_prompt() -> None:
+def test_failed_status_renders_recovery_details() -> None:
     agent_data = {
         "status": "failed",
         "last_error": {
@@ -50,7 +50,7 @@ def test_failed_status_renders_recovery_prompt() -> None:
             "suggested_fix": "wait and retry",
         },
     }
-    text = recovery.render_recovery_status(agent_data).plain
+    text = recovery.render_recovery_details(agent_data).plain
     assert "APIError" in text
     assert "rate limited" in text
     assert "wait and retry" in text

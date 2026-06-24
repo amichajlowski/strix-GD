@@ -61,14 +61,6 @@ def render_recovery_details(agent_data: dict[str, Any]) -> Text:
     return text
 
 
-def render_recovery_status(agent_data: dict[str, Any]) -> Text:
-    """Inline status-bar variant: error detail plus the recovery-options hint."""
-    text = render_recovery_details(agent_data)
-    text.append("\n\nesc", style="white")
-    text.append(" recovery options", style="dim")
-    return text
-
-
 def build_retry_message(last_error: dict[str, Any] | None) -> str:
     """A safe retry instruction that names the prior error without repeating secrets.
 

@@ -23,6 +23,10 @@ from strix.core.scrubbing import MAX_MESSAGE_LEN
         ("connect https://user:sup3rpass@example.test/x", "sup3rpass", "XXXX"),
         ("jwt eyJhbGciOi.eyJzdWIiOiIx.SflKxwRJ here", "SflKxwRJ", "XXXX"),
         ("key AKIAIOSFODNN7EXAMPLE leaked", "AKIAIOSFODNN7EXAMPLE", "XXXX"),
+        ("provider key sk-testvalue123 leaked", "sk-testvalue123", "XXXX"),
+        ("slack xoxb-1234567890-token leaked", "xoxb-1234567890-token", "XXXX"),
+        ("github ghp_1234567890abcdef leaked", "ghp_1234567890abcdef", "XXXX"),
+        ("github github_pat_1234567890abcdef leaked", "github_pat_1234567890abcdef", "XXXX"),
     ],
 )
 async def test_record_error_scrubs_structured_secret_patterns(

@@ -1184,7 +1184,10 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
         if recovery.is_error_state(agent_data):
             self._stop_dot_animation()
-            return (recovery.render_recovery_status(agent_data), Text(), False)
+            text = recovery.render_recovery_details(agent_data)
+            text.append("\n\nesc", style="white")
+            text.append(" recovery options", style="dim")
+            return (text, Text(), False)
 
         simple_statuses: dict[str, tuple[str, str]] = {
             "stopped": ("Agent stopped", ""),

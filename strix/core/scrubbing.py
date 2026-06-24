@@ -34,6 +34,14 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         ),
         rf"\1{_REDACTED}",
     ),
+    # Bare provider tokens sometimes appear in SDK exception messages.
+    (
+        re.compile(
+            r"(?i)\b(?:sk(?:-proj)?-[A-Za-z0-9_\-]{8,}|xox[baprs]-[A-Za-z0-9\-]{8,}|"
+            r"gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,})\b"
+        ),
+        _REDACTED,
+    ),
     # Common cloud key shapes (AWS access key id)
     (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), _REDACTED),
 )
@@ -62,6 +70,7 @@ if __name__ == "__main__":
     assert scrub_secrets("api_key=supersecret123&x=1") == "api_key=XXXX&x=1"
     assert scrub_secrets('{"password": "hunter2"}') == '{"password": "XXXX"}'
     assert scrub_secrets("token: abc.def") == "token: XXXX"
+    assert scrub_secrets("provider key sk-testvalue123 leaked") == "provider key XXXX leaked"
     assert "hunter2" not in scrub_secrets("password=hunter2")
     assert scrub_secrets("https://user:pass@example.test/x") == "https://XXXX@example.test/x"
     jwt = "eyJhbGciOi.eyJzdWIiOiIx.SflKxwRJ"

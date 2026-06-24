@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -11,7 +12,6 @@ from strix.core.agents import AgentCoordinator
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.core.runner import SAME_RUN_RESTART_INSTRUCTION, run_strix_scan
 from strix.core.snapshots import (
-    SnapshotError,
     load_latest_snapshot,
     previous_snapshot_path,
 )
@@ -73,7 +73,7 @@ def test_resume_fails_when_all_snapshots_invalid(tmp_path: Path) -> None:
     path.write_text("{ bad", encoding="utf-8")
     prev.write_text("{ also bad", encoding="utf-8")
 
-    with pytest.raises(SnapshotError) as excinfo:
+    with pytest.raises(RuntimeError) as excinfo:
         load_latest_snapshot(path)
 
     message = str(excinfo.value)
@@ -126,18 +126,41 @@ async def test_snapshot_write_failure_sets_checkpoint_warning(
     coordinator.set_snapshot_path(tmp_path / "agents.json")
     await coordinator.register("root", "strix", parent_id=None)
 
-    import strix.core.agents as agents_mod
-
     def boom(*_a: Any, **_k: Any) -> Any:
         raise OSError("disk full")
 
-    monkeypatch.setattr(agents_mod.tempfile, "NamedTemporaryFile", boom)
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", boom)
 
     # Must not raise — a degraded checkpoint can't crash a live audit.
     await coordinator._maybe_snapshot()
 
     assert coordinator.checkpoint_warning is not None
     assert "failed" in coordinator.checkpoint_warning.lower()
+
+
+async def test_disable_snapshots_prevents_inflight_rewrite(tmp_path: Path) -> None:
+    coordinator = AgentCoordinator()
+    path = tmp_path / "agents.json"
+    path.write_text(json.dumps({"old": True}), encoding="utf-8")
+    coordinator.set_snapshot_path(path)
+    coordinator.statuses["root"] = "running"
+    coordinator.parent_of["root"] = None
+    coordinator.names["root"] = "strix"
+    coordinator.metadata["root"] = {"task": "", "skills": []}
+
+    original_snapshot = coordinator.snapshot
+
+    async def snapshot_then_cancel() -> dict[str, Any]:
+        snap = await original_snapshot()
+        coordinator.disable_snapshots()
+        path.unlink()
+        return snap
+
+    coordinator.snapshot = snapshot_then_cancel  # type: ignore[method-assign]
+
+    await coordinator._maybe_snapshot()
+
+    assert not path.exists()
 
 
 def _mock_sandbox_and_loop(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]) -> None:

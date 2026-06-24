@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Lock
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from strix.core.scrubbing import scrub_message
@@ -45,17 +47,23 @@ class AgentCoordinator:
         self.pending_counts: dict[str, int] = {}
         self.runtimes: dict[str, AgentRuntime] = {}
         self._lock = asyncio.Lock()
+        self._snapshot_control_lock = Lock()
         self._snapshot_path: Path | None = None
+        self._snapshots_disabled = False
         self.is_shutting_down = False
         self._budget_stopped = False
         self.checkpoint_warning: str | None = None
 
     def set_snapshot_path(self, path: Path) -> None:
-        self._snapshot_path = path
+        with self._snapshot_control_lock:
+            self._snapshot_path = path
+            self._snapshots_disabled = False
 
     def disable_snapshots(self) -> None:
         """Stop writing resume snapshots (used when abandoning replay state)."""
-        self._snapshot_path = None
+        with self._snapshot_control_lock:
+            self._snapshots_disabled = True
+            self._snapshot_path = None
 
     def mark_shutting_down(self) -> None:
         self.is_shutting_down = True
@@ -369,14 +377,15 @@ class AgentCoordinator:
                 self.runtimes.setdefault(aid, AgentRuntime())
 
     async def _maybe_snapshot(self) -> None:
-        path = self._snapshot_path
-        if path is None:
-            return
+        with self._snapshot_control_lock:
+            path = self._snapshot_path
+            if path is None or self._snapshots_disabled:
+                return
+        tmp_path: Path | None = None
         try:
             data = await self.snapshot()
             payload = json.dumps(data, ensure_ascii=False, default=str)
             path.parent.mkdir(parents=True, exist_ok=True)
-            self._preserve_previous_snapshot(path)
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",
@@ -387,8 +396,16 @@ class AgentCoordinator:
             ) as tmp:
                 tmp.write(payload)
                 tmp_path = Path(tmp.name)
-            tmp_path.replace(path)
+            with self._snapshot_control_lock:
+                if self._snapshots_disabled or self._snapshot_path != path:
+                    tmp_path.unlink(missing_ok=True)
+                    return
+                self._preserve_previous_snapshot(path)
+                tmp_path.replace(path)
         except Exception:
+            if tmp_path is not None:
+                with contextlib.suppress(OSError):
+                    tmp_path.unlink(missing_ok=True)
             logger.exception("coordinator snapshot to %s failed", path)
             # Surface the degraded checkpoint without crashing the live audit.
             self.checkpoint_warning = (

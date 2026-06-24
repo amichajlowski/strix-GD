@@ -22,10 +22,6 @@ logger = logging.getLogger(__name__)
 PREVIOUS_SNAPSHOT_SUFFIX = ".previous.json"
 
 
-class SnapshotError(RuntimeError):
-    """Raised when snapshot files exist but none can be parsed."""
-
-
 def previous_snapshot_path(agents_path: Path) -> Path:
     """``.state/agents.json`` -> ``.state/agents.previous.json``."""
     return agents_path.with_name(agents_path.name.removesuffix(".json") + PREVIOUS_SNAPSHOT_SUFFIX)
@@ -49,8 +45,8 @@ def load_latest_snapshot(agents_path: Path) -> tuple[dict[str, Any] | None, str 
     missing or corrupt, falls back to ``agents.previous.json`` and returns a
     warning that the snapshot may be older than ``agents.db``. Returns
     ``(None, None)`` when no snapshot file exists at all (a brand-new or
-    never-checkpointed run). Raises :class:`SnapshotError` when snapshot files
-    are present but all of them are corrupt/unreadable.
+    never-checkpointed run). Raises ``RuntimeError`` when snapshot files are
+    present but all of them are corrupt/unreadable.
     """
     prev_path = previous_snapshot_path(agents_path)
 
@@ -69,7 +65,7 @@ def load_latest_snapshot(agents_path: Path) -> tuple[dict[str, Any] | None, str 
         return previous, warning
 
     if agents_path.exists() or prev_path.exists():
-        raise SnapshotError(
+        raise RuntimeError(
             f"Cannot resume: both snapshots are corrupt or unreadable "
             f"({agents_path} and {prev_path}). Inspect the run directory or "
             f"start a fresh run."

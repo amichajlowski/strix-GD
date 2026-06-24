@@ -62,13 +62,6 @@ SAME_RUN_RESTART_INSTRUCTION = (
 )
 
 
-def _find_root_id(coordinator: AgentCoordinator) -> str | None:
-    for aid, parent in coordinator.parent_of.items():
-        if parent is None:
-            return aid
-    return None
-
-
 async def run_strix_scan(
     *,
     scan_config: dict[str, Any],
@@ -135,7 +128,10 @@ async def run_strix_scan(
         snap, checkpoint_warning = load_latest_snapshot(agents_path)
         if snap is not None:
             await coordinator.restore(snap)
-            root_id = _find_root_id(coordinator)
+            for aid, parent in coordinator.parent_of.items():
+                if parent is None:
+                    root_id = aid
+                    break
         if root_id is not None and agents_db.exists() and checkpoint_warning is None:
             run_mode = "resume"
         else:
