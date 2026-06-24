@@ -41,7 +41,7 @@ def _mock_sandbox_and_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(session_manager, "create_or_reuse", fake_create)
     monkeypatch.setattr(session_manager, "cleanup", fake_cleanup)
     monkeypatch.setattr(runner_mod, "build_strix_agent", lambda **_k: object())
-    monkeypatch.setattr(runner_mod, "make_child_factory", lambda **_k: (lambda **_kk: object()))
+    monkeypatch.setattr(runner_mod, "make_child_factory", lambda **_k: lambda **_kk: object())
     monkeypatch.setattr(runner_mod, "run_agent_loop", fake_loop)
 
 

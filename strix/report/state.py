@@ -300,9 +300,9 @@ class ReportState:
             # paused / cancelled_findings_saved are deliberate recovery states;
             # a later cleanup(status="stopped"/"interrupted") must never downgrade
             # them or resume/restart gates would misread the run.
-            if current_status in _PROTECTED_RECOVERY_STATUSES:
-                status = str(current_status)
-            elif status == "stopped" and current_status in {"failed", "interrupted"}:
+            if current_status in _PROTECTED_RECOVERY_STATUSES or (
+                status == "stopped" and current_status in {"failed", "interrupted"}
+            ):
                 status = str(current_status)
             if self.end_time is None:
                 self.end_time = datetime.now(UTC).isoformat()

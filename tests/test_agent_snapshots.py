@@ -155,7 +155,6 @@ def _mock_sandbox_and_loop(monkeypatch: pytest.MonkeyPatch, captured: dict[str, 
     async def fake_loop(**kwargs: Any) -> None:
         captured["agent_id"] = kwargs.get("agent_id")
         captured["initial_input"] = kwargs.get("initial_input")
-        return None
 
     async def fake_respawn(**_k: Any) -> None:
         captured["respawn_called"] = True
@@ -163,6 +162,6 @@ def _mock_sandbox_and_loop(monkeypatch: pytest.MonkeyPatch, captured: dict[str, 
     monkeypatch.setattr(session_manager, "create_or_reuse", fake_create)
     monkeypatch.setattr(session_manager, "cleanup", fake_cleanup)
     monkeypatch.setattr(runner_mod, "build_strix_agent", lambda **_k: object())
-    monkeypatch.setattr(runner_mod, "make_child_factory", lambda **_k: (lambda **_kk: object()))
+    monkeypatch.setattr(runner_mod, "make_child_factory", lambda **_k: lambda **_kk: object())
     monkeypatch.setattr(runner_mod, "run_agent_loop", fake_loop)
     monkeypatch.setattr(runner_mod, "respawn_subagents", fake_respawn)

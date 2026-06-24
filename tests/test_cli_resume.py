@@ -22,9 +22,7 @@ def _write_run(run_name: str, *, status: str) -> None:
         "run_id": run_name,
         "run_name": run_name,
         "status": status,
-        "targets_info": [
-            {"type": "web_application", "details": {"target_url": "https://x.test"}}
-        ],
+        "targets_info": [{"type": "web_application", "details": {"target_url": "https://x.test"}}],
         "scan_mode": "deep",
     }
     write_run_record(run_dir, record)

@@ -310,6 +310,7 @@ def _positive_budget(value: str) -> float:
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"invalid float value: {value!r}") from exc
     import math
+
     if not math.isfinite(budget) or budget <= 0:
         raise argparse.ArgumentTypeError("must be a finite number greater than 0")
     return budget
@@ -589,6 +590,8 @@ def repair_resume_sources(args: argparse.Namespace) -> None:
         details = target.get("details") or {}
         if target.get("type") == "repository" and details.get("needs_reclone"):
             repo_url = details.get("target_repo")
+            if not isinstance(repo_url, str):
+                continue
             dest_name = details.get("workspace_subdir")
             cloned_path = clone_repository(repo_url, args.run_name, dest_name)
             details["cloned_repo_path"] = cloned_path

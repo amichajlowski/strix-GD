@@ -104,7 +104,14 @@ def test_save_for_resume_preserves_agent_state(tmp_path: Path) -> None:
     state_dir.mkdir(parents=True)
     (state_dir / "agents.json").write_text("{}", encoding="utf-8")
     (state_dir / "agents.db").write_text("db", encoding="utf-8")
-    report_state.vulnerability_reports = [{"id": "vuln-0001", "title": "X", "severity": "high", "timestamp": "2026-01-01 00:00:00 UTC"}]
+    report_state.vulnerability_reports = [
+        {
+            "id": "vuln-0001",
+            "title": "X",
+            "severity": "high",
+            "timestamp": "2026-01-01 00:00:00 UTC",
+        }
+    ]
 
     recovery.save_for_resume(report_state)
 
@@ -118,7 +125,14 @@ def test_save_for_resume_preserves_agent_state(tmp_path: Path) -> None:
 async def test_cancel_keep_findings_discards_state_keeps_findings(tmp_path: Path) -> None:
     report_state = ReportState("run-x")
     report_state._run_dir = tmp_path
-    report_state.vulnerability_reports = [{"id": "vuln-0001", "title": "X", "severity": "high", "timestamp": "2026-01-01 00:00:00 UTC"}]
+    report_state.vulnerability_reports = [
+        {
+            "id": "vuln-0001",
+            "title": "X",
+            "severity": "high",
+            "timestamp": "2026-01-01 00:00:00 UTC",
+        }
+    ]
 
     state_dir = runtime_state_dir(tmp_path)
     state_dir.mkdir(parents=True)

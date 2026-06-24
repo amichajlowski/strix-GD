@@ -239,6 +239,9 @@ ignore = [
 "strix/interface/tui/app.py" = ["BLE001", "PLC0415", "PLR0912", "PLR0915", "SIM105"]
 "strix/interface/main.py" = ["BLE001", "PLC0415", "PLR0912", "PLR0915"]
 "strix/interface/tui/renderers/agent_message_renderer.py" = ["PLC0415"]
+# Tests use in-function imports to monkeypatch module objects and control
+# import timing; pytest is imported only for fixture-type annotations.
+"tests/**" = ["PLC0415", "TC002"]
 
 [tool.ruff.lint.isort]
 force-single-line = false

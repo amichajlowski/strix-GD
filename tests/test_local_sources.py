@@ -193,7 +193,9 @@ def test_dedupe_collapses_duplicate_mounts() -> None:
     assert len(result) == 1
 
 
-def _run_record(run_name: str, targets_info: list[dict[str, Any]], *, status: str = "running") -> None:
+def _run_record(
+    run_name: str, targets_info: list[dict[str, Any]], *, status: str = "running"
+) -> None:
     run_dir = run_dir_for(run_name)
     run_dir.mkdir(parents=True, exist_ok=True)
     write_run_record(
@@ -307,7 +309,12 @@ def test_resume_missing_user_local_path_is_repairable_error(
     missing = tmp_path / "deleted-src"
     _run_record(
         "run-l",
-        [{"type": "local_code", "details": {"target_path": str(missing), "workspace_subdir": "src"}}],
+        [
+            {
+                "type": "local_code",
+                "details": {"target_path": str(missing), "workspace_subdir": "src"},
+            }
+        ],
     )
     monkeypatch.setattr("sys.argv", ["strix", "--resume", "run-l"])
 
