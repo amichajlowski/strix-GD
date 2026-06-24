@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from strix.core.scrubbing import scrub_message
+from strix.core.snapshots import previous_snapshot_path
 
 
 if TYPE_CHECKING:
@@ -375,6 +376,7 @@ class AgentCoordinator:
             data = await self.snapshot()
             payload = json.dumps(data, ensure_ascii=False, default=str)
             path.parent.mkdir(parents=True, exist_ok=True)
+            self._preserve_previous_snapshot(path)
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",
@@ -388,6 +390,29 @@ class AgentCoordinator:
             tmp_path.replace(path)
         except Exception:
             logger.exception("coordinator snapshot to %s failed", path)
+            # Surface the degraded checkpoint without crashing the live audit.
+            self.checkpoint_warning = (
+                f"Checkpoint write to {path} failed; resume state may be stale."
+            )
+
+    @staticmethod
+    def _preserve_previous_snapshot(path: Path) -> None:
+        """Copy the current valid snapshot to ``*.previous.json`` before overwrite.
+
+        Only a parseable current snapshot is backed up — a corrupt or
+        never-written current file must not clobber a good previous copy.
+        """
+        if not path.exists():
+            return
+        try:
+            existing = path.read_text(encoding="utf-8")
+            json.loads(existing)
+        except (OSError, json.JSONDecodeError):
+            return
+        try:
+            previous_snapshot_path(path).write_text(existing, encoding="utf-8")
+        except OSError:
+            logger.warning("could not write previous snapshot copy for %s", path)
 
 
 def coordinator_from_context(ctx: dict[str, Any]) -> AgentCoordinator | None:

@@ -134,10 +134,12 @@ async def run_strix_scan(
         if snap is not None:
             await coordinator.restore(snap)
             root_id = _find_root_id(coordinator)
-        if root_id is not None and agents_db.exists():
+        if root_id is not None and agents_db.exists() and checkpoint_warning is None:
             run_mode = "resume"
         else:
-            # Missing/corrupt snapshot or missing SDK database: restart root only.
+            # Missing/corrupt snapshot, missing SDK database, or a previous-snapshot
+            # fallback (stale topology): restart the root only rather than deep
+            # replaying — never respawn children into empty SDK sessions.
             run_mode = "same_run_restart"
     if root_id is None:
         root_id = uuid.uuid4().hex[:8]

@@ -56,6 +56,17 @@ def test_failed_status_renders_recovery_prompt() -> None:
     assert "wait and retry" in text
 
 
+def test_tui_displays_checkpoint_warning() -> None:
+    live_view = TuiLiveView()
+    live_view.upsert_agent("a1", name="strix", status="running")
+    live_view.upsert_agent("a1", checkpoint_warning="snapshot may be stale")
+
+    agent = live_view.agents["a1"]
+    assert agent["checkpoint_warning"] == "snapshot may be stale"
+    # The warning is additive — it must not replace the agent's status.
+    assert agent["status"] == "running"
+
+
 def test_is_error_state_distinguishes_user_stop_from_error_stop() -> None:
     assert recovery.is_error_state({"status": "failed"})
     assert recovery.is_error_state({"status": "crashed"})

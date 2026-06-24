@@ -1241,6 +1241,13 @@ class StrixTUIApp(App):  # type: ignore[misc]
                 self._safe_widget_operation(status_display.add_class, "hidden")
                 return
 
+            warning = agent_data.get("checkpoint_warning")
+            if warning:
+                # Append, don't replace: checkpoint health is advisory and must
+                # not hide the agent's actual status.
+                content.append("\n⚠ ", style="yellow")
+                content.append(str(warning), style="dim yellow")
+
             self._safe_widget_operation(status_text.update, content)
             self._safe_widget_operation(keymap_indicator.update, keymap)
             self._safe_widget_operation(status_display.remove_class, "hidden")
