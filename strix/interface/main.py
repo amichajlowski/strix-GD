@@ -575,6 +575,29 @@ def _persist_run_record(args: argparse.Namespace) -> None:
     write_run_record(run_dir, run_record)
 
 
+def repair_resume_sources(args: argparse.Namespace) -> None:
+    """Re-clone run-owned repositories that went missing between runs.
+
+    Runs after argument parsing (so argparse stays network-free) and re-clones
+    into the same run-owned ``sources/`` location, then refreshes
+    ``local_sources`` so the restored paths propagate to the sandbox.
+    """
+    repaired = False
+    for target in getattr(args, "targets_info", []) or []:
+        if not isinstance(target, dict):
+            continue
+        details = target.get("details") or {}
+        if target.get("type") == "repository" and details.get("needs_reclone"):
+            repo_url = details.get("target_repo")
+            dest_name = details.get("workspace_subdir")
+            cloned_path = clone_repository(repo_url, args.run_name, dest_name)
+            details["cloned_repo_path"] = cloned_path
+            details.pop("needs_reclone", None)
+            repaired = True
+    if repaired:
+        args.local_sources = collect_local_sources(args.targets_info)
+
+
 def _load_resume_state(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     """Populate ``args.targets_info`` and friends from a prior run's run.json."""
     run_dir = run_dir_for(args.resume)
@@ -598,17 +621,22 @@ def _load_resume_state(args: argparse.Namespace, parser: argparse.ArgumentParser
         if not isinstance(target, dict):
             continue
         details = target.get("details") or {}
-        if target.get("type") != "repository":
-            continue
-        cloned = details.get("cloned_repo_path")
-        if not cloned:
-            continue
-        if not Path(cloned).expanduser().exists():
-            parser.error(
-                f"--resume {args.resume}: cloned repo at {cloned} is missing. "
-                f"It was deleted between runs. Pick a fresh --run-name to "
-                f"re-clone, or restore the directory before resuming."
-            )
+        ttype = target.get("type")
+        if ttype == "repository":
+            cloned = details.get("cloned_repo_path")
+            if cloned and not Path(cloned).expanduser().exists():
+                # Run-owned clone: repairable by re-cloning. Do not run git here
+                # (argparse stays network-free); main() repairs after parsing.
+                details["needs_reclone"] = True
+        elif ttype == "local_code":
+            path = details.get("target_path")
+            if path and not Path(path).expanduser().exists():
+                kind = "bind-mount" if details.get("mount") else "local source"
+                parser.error(
+                    f"--resume {args.resume}: {kind} path {path} no longer exists. "
+                    f"Restore it to its original location, or start a fresh run "
+                    f"with an updated --target/--mount."
+                )
 
     if args.instruction is None:
         args.instruction = state.get("instruction")
@@ -805,6 +833,8 @@ def main() -> None:
                 args.instruction = diff_scope.instruction_block
 
         _persist_run_record(args)
+    else:
+        repair_resume_sources(args)
 
     _telemetry_start_kwargs = {
         "model": load_settings().llm.model,

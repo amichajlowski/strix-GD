@@ -38,6 +38,8 @@ from strix.core.inputs import (
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.core.sessions import open_agent_session
 from strix.core.snapshots import load_latest_snapshot
+from strix.report.evidence import write_evidence_manifest
+from strix.report.state import get_global_report_state
 from strix.runtime import session_manager
 from strix.telemetry.logging import set_scan_id, setup_scan_logging
 
@@ -352,8 +354,20 @@ async def run_strix_scan(
                 s.close()
         with contextlib.suppress(Exception):
             await coordinator._maybe_snapshot()
+        # Persist the evidence manifest before tearing down the sandbox so it
+        # survives even if cleanup hangs. Single writer, so no idempotency race.
+        with contextlib.suppress(Exception):
+            report_state = get_global_report_state()
+            write_evidence_manifest(
+                run_dir=run_dir,
+                local_sources=local_sources or [],
+                caido_url=getattr(report_state, "caido_url", None),
+                sandbox_cleanup="pending" if cleanup_on_exit else "skipped",
+            )
         if cleanup_on_exit:
             logger.info("Tearing down sandbox session for scan %s", scan_id)
-            await session_manager.cleanup(scan_id)
+            # Best-effort: a cleanup failure must not block findings/evidence.
+            with contextlib.suppress(Exception):
+                await session_manager.cleanup(scan_id)
         logger.info("Strix scan %s done", scan_id)
         teardown_logging()

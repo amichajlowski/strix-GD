@@ -56,6 +56,19 @@ def test_mixed_sources_split_correctly(tmp_path: Path) -> None:
     assert [m["target"] for m in bind_mounts] == ["/workspace/mounted"]
 
 
+def test_workspace_subdir_mapping_stays_stable(tmp_path: Path) -> None:
+    # A run-owned clone path still maps to the same /workspace/<subdir> entry.
+    clone = tmp_path / "strix_runs" / "run-x" / "sources" / "repo"
+    clone.mkdir(parents=True)
+
+    entries, bind_mounts = build_session_entries([_source("repo", str(clone))])
+
+    assert list(entries) == ["repo"]
+    assert isinstance(entries["repo"], LocalDir)
+    assert entries["repo"].src == clone.resolve()
+    assert bind_mounts == []
+
+
 def test_incomplete_sources_are_skipped() -> None:
     entries, bind_mounts = build_session_entries(
         [

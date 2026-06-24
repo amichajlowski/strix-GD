@@ -13,13 +13,18 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
+import argparse
+
+from strix.core.paths import run_dir_for
 from strix.interface.utils import (
     build_mount_targets_info,
+    clone_repository,
     collect_local_sources,
     dedupe_local_targets,
     directory_size_bytes,
     find_oversized_local_targets,
 )
+from strix.report.writer import write_run_record
 
 
 def _write_file(path: Path, size: int) -> None:
@@ -186,3 +191,129 @@ def test_dedupe_collapses_duplicate_mounts() -> None:
         [_local_target("/repo", mount=True), _local_target("/repo", mount=True)]
     )
     assert len(result) == 1
+
+
+def _run_record(run_name: str, targets_info: list[dict[str, Any]], *, status: str = "running") -> None:
+    run_dir = run_dir_for(run_name)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_run_record(
+        run_dir,
+        {
+            "run_id": run_name,
+            "run_name": run_name,
+            "status": status,
+            "targets_info": targets_info,
+            "scan_mode": "deep",
+        },
+    )
+
+
+def test_repository_clone_uses_run_owned_sources_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    from strix.interface import utils
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(cmd: list[str], **_k: Any) -> _Result:
+        from pathlib import Path as _Path
+
+        _Path(cmd[-1]).mkdir(parents=True, exist_ok=True)
+        return _Result()
+
+    monkeypatch.setattr(utils.subprocess, "run", fake_run)
+
+    result = clone_repository("https://github.com/u/repo.git", "run-x", "repo")
+
+    expected = tmp_path / "strix_runs" / "run-x" / "sources" / "repo"
+    assert result == str(expected.absolute())
+
+
+def test_resume_reclones_missing_run_owned_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib
+
+    main = importlib.import_module("strix.interface.main")
+
+    monkeypatch.setattr(
+        main, "clone_repository", lambda _url, run, dest: f"/runs/{run}/sources/{dest}"
+    )
+    args = argparse.Namespace(
+        run_name="run-x",
+        local_sources=[],
+        targets_info=[
+            {
+                "type": "repository",
+                "details": {
+                    "target_repo": "https://github.com/u/repo.git",
+                    "workspace_subdir": "repo",
+                    "cloned_repo_path": "/gone",
+                    "needs_reclone": True,
+                },
+            }
+        ],
+    )
+
+    main.repair_resume_sources(args)
+
+    details = args.targets_info[0]["details"]
+    assert details["cloned_repo_path"] == "/runs/run-x/sources/repo"
+    assert "needs_reclone" not in details
+
+
+def test_missing_clone_repair_is_not_performed_in_argparse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    import importlib
+
+    main = importlib.import_module("strix.interface.main")
+
+    _run_record(
+        "run-r",
+        [
+            {
+                "type": "repository",
+                "details": {
+                    "target_repo": "https://x.test/r.git",
+                    "workspace_subdir": "r",
+                    "cloned_repo_path": str(tmp_path / "gone"),
+                },
+            }
+        ],
+    )
+
+    def boom(*_a: Any, **_k: Any) -> None:
+        raise AssertionError("git clone must not run during argument parsing")
+
+    monkeypatch.setattr(main, "clone_repository", boom)
+    monkeypatch.setattr("sys.argv", ["strix", "--resume", "run-r"])
+
+    args = main.parse_arguments()
+
+    assert args.targets_info[0]["details"].get("needs_reclone") is True
+
+
+def test_resume_missing_user_local_path_is_repairable_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    import importlib
+
+    main = importlib.import_module("strix.interface.main")
+
+    missing = tmp_path / "deleted-src"
+    _run_record(
+        "run-l",
+        [{"type": "local_code", "details": {"target_path": str(missing), "workspace_subdir": "src"}}],
+    )
+    monkeypatch.setattr("sys.argv", ["strix", "--resume", "run-l"])
+
+    with pytest.raises(SystemExit):
+        main.parse_arguments()
+
+    err = capsys.readouterr().err
+    assert str(missing) in err
+    assert "Restore" in err or "fresh" in err

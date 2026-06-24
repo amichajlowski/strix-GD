@@ -7,7 +7,6 @@ import secrets
 import shutil
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -22,6 +21,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from strix.config import load_settings
+from strix.core.paths import run_dir_for
 
 
 logger = logging.getLogger(__name__)
@@ -1378,15 +1378,17 @@ def clone_repository(repo_url: str, run_name: str, dest_name: str | None = None)
     if git_executable is None:
         raise FileNotFoundError("Git executable not found in PATH")
 
-    temp_dir = Path(tempfile.gettempdir()) / "strix_repos" / run_name
-    temp_dir.mkdir(parents=True, exist_ok=True)
+    # Clone under the run directory (not temp) so the source survives for
+    # --resume even after the OS clears its temp dir.
+    sources_dir = run_dir_for(run_name) / "sources"
+    sources_dir.mkdir(parents=True, exist_ok=True)
 
     if dest_name:
         repo_name = dest_name
     else:
         repo_name = Path(repo_url).stem if repo_url.endswith(".git") else Path(repo_url).name
 
-    clone_path = temp_dir / repo_name
+    clone_path = sources_dir / repo_name
 
     if clone_path.exists():
         shutil.rmtree(clone_path)
