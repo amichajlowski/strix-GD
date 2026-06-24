@@ -37,6 +37,7 @@ from strix.core.inputs import (
 )
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.core.sessions import open_agent_session
+from strix.core.snapshots import load_latest_snapshot
 from strix.runtime import session_manager
 from strix.telemetry.logging import set_scan_id, setup_scan_logging
 
@@ -49,6 +50,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 StreamEventSink = Callable[[str, Any], None]
+
+SAME_RUN_RESTART_INSTRUCTION = (
+    "Previous agent session history for this run was unavailable, so only the "
+    "root agent is being restarted. Prior findings are preserved in the run "
+    "report. Re-establish context from the run configuration and existing "
+    "findings, then continue the assessment. Do not assume earlier in-progress "
+    "agent state still exists."
+)
+
+
+def _find_root_id(coordinator: AgentCoordinator) -> str | None:
+    for aid, parent in coordinator.parent_of.items():
+        if parent is None:
+            return aid
+    return None
 
 
 async def run_strix_scan(
@@ -78,17 +94,6 @@ async def run_strix_scan(
 
     agents_path = state_dir / "agents.json"
     agents_db = state_dir / "agents.db"
-    is_resume = agents_path.exists()
-
-    logger.info(
-        "%s Strix scan %s (image=%s, max_turns=%d, interactive=%s, run_dir=%s)",
-        "Resuming" if is_resume else "Starting",
-        scan_id,
-        image,
-        max_turns,
-        interactive,
-        run_dir,
-    )
 
     settings = load_settings()
     configure_sdk_model_defaults(settings)
@@ -110,51 +115,72 @@ async def run_strix_scan(
     hydrate_todos_from_disk(state_dir)
     hydrate_notes_from_disk(state_dir)
 
+    # Resolve scan inputs before sandbox startup so the root checkpoint can be
+    # written even if the sandbox never comes up.
+    targets = scan_config.get("targets") or []
+    scan_mode = str(scan_config.get("scan_mode") or "deep")
+    is_whitebox = any(t.get("type") == "local_code" for t in targets)
+    skills = list(scan_config.get("skills") or [])
+    root_task = build_root_task(scan_config)
+    scope_context = build_scope_context(scan_config)
+
+    # Run mode: fresh / resume / same_run_restart.
+    resume_requested = bool(scan_config.get("resume"))
+    run_mode = "fresh"
     root_id: str | None = None
-    if is_resume:
-        try:
-            snap = json.loads(agents_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(
-                f"Cannot resume scan {scan_id}: agents.json is unreadable: {exc}",
-            ) from exc
-        if not agents_db.exists():
-            raise RuntimeError(
-                f"Cannot resume scan {scan_id}: missing SDK session database at {agents_db}",
-            )
-        await coordinator.restore(snap)
-        for aid, parent in coordinator.parent_of.items():
-            if parent is None:
-                root_id = aid
-                break
-        if root_id is None:
-            raise RuntimeError(
-                f"Cannot resume scan {scan_id}: agents.json has no root agent (parent=None)",
-            )
-        logger.info(
-            "Resume: restored coordinator with %d agent(s); root=%s",
-            len(coordinator.statuses),
-            root_id,
-        )
-    else:
+    checkpoint_warning: str | None = None
+    if resume_requested:
+        snap, checkpoint_warning = load_latest_snapshot(agents_path)
+        if snap is not None:
+            await coordinator.restore(snap)
+            root_id = _find_root_id(coordinator)
+        if root_id is not None and agents_db.exists():
+            run_mode = "resume"
+        else:
+            # Missing/corrupt snapshot or missing SDK database: restart root only.
+            run_mode = "same_run_restart"
+    if root_id is None:
         root_id = uuid.uuid4().hex[:8]
 
-    logger.info("Bringing up sandbox session for scan %s", scan_id)
-    bundle = await session_manager.create_or_reuse(
+    logger.info(
+        "%s Strix scan %s mode=%s (image=%s, max_turns=%d, interactive=%s, run_dir=%s)",
+        {"fresh": "Starting", "resume": "Resuming", "same_run_restart": "Restarting"}[run_mode],
         scan_id,
-        image=image,
-        local_sources=local_sources or [],
+        run_mode,
+        image,
+        max_turns,
+        interactive,
+        run_dir,
     )
-    logger.info("Sandbox ready for scan %s", scan_id)
+    if checkpoint_warning:
+        coordinator.checkpoint_warning = checkpoint_warning
+        logger.warning("Resume checkpoint warning: %s", checkpoint_warning)
+
+    # Register the root and write the initial checkpoint BEFORE sandbox startup
+    # so an early failure still leaves a resumable run with a visible root.
+    # ``resume`` already restored the root from the snapshot.
+    if run_mode != "resume" and root_id not in coordinator.statuses:
+        await coordinator.register(
+            root_id,
+            "strix",
+            parent_id=None,
+            task=root_task,
+            skills=skills,
+        )
+    else:
+        await coordinator._maybe_snapshot()
 
     sessions_to_close: list[SQLiteSession] = []
 
     try:
-        targets = scan_config.get("targets") or []
-        scan_mode = str(scan_config.get("scan_mode") or "deep")
-        is_whitebox = any(t.get("type") == "local_code" for t in targets)
-        skills = list(scan_config.get("skills") or [])
-        root_task = build_root_task(scan_config)
+        logger.info("Bringing up sandbox session for scan %s", scan_id)
+        bundle = await session_manager.create_or_reuse(
+            scan_id,
+            image=image,
+            local_sources=local_sources or [],
+        )
+        logger.info("Sandbox ready for scan %s", scan_id)
+
         model_settings = make_model_settings(
             settings.llm.reasoning_effort,
             model_name=resolved_model,
@@ -169,8 +195,6 @@ async def run_strix_scan(
         )
         hooks = ReportUsageHooks(model=resolved_model, max_budget_usd=max_budget_usd)
 
-        scope_context = build_scope_context(scan_config)
-
         root_agent = build_strix_agent(
             name="strix",
             skills=skills,
@@ -181,15 +205,6 @@ async def run_strix_scan(
             chat_completions_tools=chat_completions_tools,
             system_prompt_context=scope_context,
         )
-
-        if not is_resume:
-            await coordinator.register(
-                root_id,
-                "strix",
-                parent_id=None,
-                task=root_task,
-                skills=skills,
-            )
 
         child_agent_builder = make_child_factory(
             scan_mode=scan_mode,
@@ -227,7 +242,9 @@ async def run_strix_scan(
         sessions_to_close.append(root_session)
         await coordinator.attach_runtime(root_id, session=root_session)
 
-        if is_resume:
+        # Only a full resume replays children. same_run_restart restarts the
+        # root only and never respawns children into empty SDK sessions.
+        if run_mode == "resume":
             await respawn_subagents(
                 coordinator=coordinator,
                 factory=child_agent_builder,
@@ -242,7 +259,12 @@ async def run_strix_scan(
                 hooks=hooks,
             )
 
-        initial_input: Any = [] if is_resume else root_task
+        if run_mode == "resume":
+            initial_input: Any = []
+        elif run_mode == "same_run_restart":
+            initial_input = f"{SAME_RUN_RESTART_INSTRUCTION}\n\n{root_task}"
+        else:
+            initial_input = root_task
 
         # Resume + new ``--instruction``: SDK replay drives root from
         # agents.db with ``initial_input=[]``, so a brand-new instruction
@@ -250,7 +272,7 @@ async def run_strix_scan(
         # Inject it as a fresh user message in root's SDK session; the
         # next run cycle will replay it with the rest of the session.
         resume_instruction = str(scan_config.get("resume_instruction") or "").strip()
-        if is_resume and resume_instruction:
+        if run_mode == "resume" and resume_instruction:
             await coordinator.send(
                 root_id,
                 {
@@ -278,7 +300,7 @@ async def run_strix_scan(
             agent_id=root_id,
             interactive=interactive,
             session=root_session,
-            start_parked=bool(interactive and is_resume and root_status != "running"),
+            start_parked=bool(interactive and run_mode == "resume" and root_status != "running"),
             event_sink=event_sink,
             hooks=hooks,
         )
@@ -310,9 +332,14 @@ async def run_strix_scan(
             with contextlib.suppress(Exception):
                 await coordinator.set_status(root_id, "stopped")
         return None
-    except BaseException:
+    except BaseException as exc:
         logger.exception("Strix scan %s failed", scan_id)
         if root_id is not None:
+            # Record the failure (e.g. sandbox/Caido startup) on the root so the
+            # early checkpoint carries a visible, scrubbed cause for recovery.
+            if isinstance(exc, Exception):
+                with contextlib.suppress(Exception):
+                    await coordinator.record_error(root_id, exc)
             await coordinator.cancel_descendants(root_id)
             with contextlib.suppress(Exception):
                 await coordinator.set_status(root_id, "failed")

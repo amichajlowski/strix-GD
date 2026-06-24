@@ -494,14 +494,17 @@ Examples:
                 "the prior run left off, including the original target list."
             )
         _load_resume_state(args, parser)
-        agents_path = runtime_state_dir(run_dir_for(args.resume)) / "agents.json"
-        if not agents_path.exists():
+        if getattr(args, "resume_run_status", None) == "cancelled_findings_saved":
             parser.error(
-                f"--resume {args.resume}: missing {agents_path}. The run was "
-                f"persisted but never reached its first agent snapshot — "
-                f"there's nothing to resume from. Pick a fresh --run-name "
-                f"or remove --resume to start over with the same targets."
+                f"--resume {args.resume}: this run was cancelled with findings kept "
+                f"(status=cancelled_findings_saved). Its agent replay state was "
+                f"intentionally discarded, so it cannot be resumed or restarted. "
+                f"Start a fresh run to continue testing these targets."
             )
+        # A missing agents.json no longer hard-fails: with a valid run.json the
+        # runner performs a same-run restart (root only) instead.
+        agents_path = runtime_state_dir(run_dir_for(args.resume)) / "agents.json"
+        args.same_run_restart = not agents_path.exists()
     else:
         if not args.target and not args.mount:
             parser.error(
@@ -586,6 +589,7 @@ def _load_resume_state(args: argparse.Namespace, parser: argparse.ArgumentParser
     except RuntimeError as exc:
         parser.error(f"--resume {args.resume}: run.json unreadable: {exc}")
 
+    args.resume_run_status = state.get("status")
     args.targets_info = state.get("targets_info") or []
     if not args.targets_info:
         parser.error(f"--resume {args.resume}: run.json has no targets_info")
