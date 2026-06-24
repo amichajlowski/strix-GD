@@ -21,7 +21,7 @@ close the scan loop, so TUI messages cannot wake the root orchestrator after fai
 ## Functional Scope
 
 Add a TUI recovery state for failed, crashed, or stopped agents that still have an attached session.
-The user sees the cause, suggested fix, and clear actions:
+The user sees the exception type, scrubbed message, and clear actions:
 
 - Retry selected agent
 - Save state for later resume
@@ -46,8 +46,6 @@ in the chosen Textual surface.
    - status
    - exception type
    - scrubbed message
-   - likely cause if known
-   - suggested fix
 4. User chooses one of:
    - Retry: send a retry instruction to the selected agent.
    - Save for resume: persist state and exit cleanly.
@@ -56,11 +54,11 @@ in the chosen Textual surface.
 ## Ordered Tasks
 
 1. Add a minimal structured-secret scrubber for recovery metadata, as defined in `README.md`.
-2. Add `AgentCoordinator.record_error(agent_id, exc, *, cause=None, suggested_fix=None,
-   recoverable=True)` that writes `metadata[agent_id]["last_error"]`.
+2. Add `AgentCoordinator.record_error(agent_id, exc)` that writes
+   `metadata[agent_id]["last_error"]`.
    - capture exception type, status code when available, and a bounded scrubbed message prefix
    - do not persist full provider responses, request bodies, headers, cookies, or credentials
-3. Add `AgentCoordinator.clear_error(agent_id)` and call it from `mark_running()`.
+3. Clear `last_error` from `mark_running()` when the agent returns to work.
 4. Add a graph snapshot method that includes metadata without breaking existing callers, for example
    `graph_snapshot_with_metadata()`.
 5. In `strix/core/execution.py`, record structured errors before setting `failed`, `crashed`, or
@@ -115,7 +113,7 @@ terminal integration where possible.
    - Assert `TuiLiveView.upsert_agent()` stores the error message and type.
 5. `tests/test_tui_recovery.py::test_failed_status_renders_recovery_prompt`
    - Build failed agent data with `last_error`.
-   - Assert the status display contains the exception type, message, and suggested fix.
+   - Assert the status display contains the exception type and scrubbed message.
 6. `tests/test_tui_recovery.py::test_retry_failed_agent_reruns_and_clears_last_error`
    - Select a failed agent with attached session.
    - Trigger retry.

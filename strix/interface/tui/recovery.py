@@ -36,7 +36,7 @@ def is_error_state(agent_data: dict[str, Any]) -> bool:
 
 
 def render_recovery_details(agent_data: dict[str, Any]) -> Text:
-    """Selectable error detail: status, exception type, message, cause, fix."""
+    """Selectable error detail: status, exception type, and scrubbed message."""
     status = str(agent_data.get("status", "failed"))
     last_error = agent_data.get("last_error") or {}
     text = Text()
@@ -44,20 +44,12 @@ def render_recovery_details(agent_data: dict[str, Any]) -> Text:
 
     err_type = last_error.get("type")
     message = last_error.get("message") or agent_data.get("error_message")
-    cause = last_error.get("cause")
-    suggested_fix = last_error.get("suggested_fix")
 
     if err_type:
         text.append(f"  ({err_type})", style="red")
     if message:
         text.append("\n")
         text.append(str(message))
-    if cause:
-        text.append("\nLikely cause: ", style="bold")
-        text.append(str(cause))
-    if suggested_fix:
-        text.append("\nSuggested fix: ", style="bold")
-        text.append(str(suggested_fix))
     return text
 
 

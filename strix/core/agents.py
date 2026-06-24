@@ -131,10 +131,6 @@ class AgentCoordinator:
         self,
         agent_id: str,
         exc: BaseException,
-        *,
-        cause: str | None = None,
-        suggested_fix: str | None = None,
-        recoverable: bool = True,
     ) -> None:
         """Store a bounded, scrubbed ``last_error`` record on agent metadata.
 
@@ -145,28 +141,17 @@ class AgentCoordinator:
         record: dict[str, Any] = {
             "type": type(exc).__name__,
             "message": scrub_message(str(exc)),
-            "recoverable": recoverable,
             "occurred_at": datetime.now(UTC).isoformat(),
         }
         status_code = getattr(exc, "status_code", None)
         if isinstance(status_code, int):
             record["status_code"] = status_code
-        if cause:
-            record["cause"] = scrub_message(cause)
-        if suggested_fix:
-            record["suggested_fix"] = scrub_message(suggested_fix)
         async with self._lock:
             md = self.metadata.get(agent_id)
             if md is not None:
                 md["last_error"] = record
         logger.info("agent.error %s type=%s", agent_id, record["type"])
         await self._maybe_snapshot()
-
-    async def clear_error(self, agent_id: str) -> None:
-        async with self._lock:
-            md = self.metadata.get(agent_id)
-            if md is not None:
-                md.pop("last_error", None)
 
     async def park_waiting(self, agent_id: str) -> None:
         await self.set_status(agent_id, "waiting")

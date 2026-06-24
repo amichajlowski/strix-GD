@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from strix.core.agents import AgentCoordinator
 from strix.core.paths import runtime_state_dir
@@ -47,13 +47,11 @@ def test_failed_status_renders_recovery_details() -> None:
         "last_error": {
             "type": "APIError",
             "message": "rate limited",
-            "suggested_fix": "wait and retry",
         },
     }
     text = recovery.render_recovery_details(agent_data).plain
     assert "APIError" in text
     assert "rate limited" in text
-    assert "wait and retry" in text
 
 
 def test_tui_displays_checkpoint_warning() -> None:
@@ -80,7 +78,7 @@ async def test_retry_failed_agent_reruns_and_clears_last_error() -> None:
     await coordinator.register("a1", "strix", parent_id=None)
     await coordinator.record_error("a1", RuntimeError("boom"))
     await coordinator.set_status("a1", "failed")
-    coordinator.runtimes["a1"].session = _FakeSession()
+    coordinator.runtimes["a1"].session = cast("Any", _FakeSession())
 
     last_error = coordinator.metadata["a1"]["last_error"]
     message = recovery.build_retry_message(last_error)

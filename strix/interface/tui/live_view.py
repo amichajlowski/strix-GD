@@ -66,7 +66,6 @@ class TuiLiveView:
         name: str | None = None,
         parent_id: str | None = None,
         status: str | None = None,
-        error_message: str | None = None,
         last_error: dict[str, Any] | None = None,
         checkpoint_warning: str | None = None,
     ) -> None:
@@ -91,9 +90,7 @@ class TuiLiveView:
         if last_error:
             current["last_error"] = last_error
             # Keep a flat message for the existing status display fallback.
-            current["error_message"] = last_error.get("message") or error_message
-        elif error_message:
-            current["error_message"] = error_message
+            current["error_message"] = last_error.get("message")
         if checkpoint_warning is not None:
             current["checkpoint_warning"] = checkpoint_warning
         current["updated_at"] = now

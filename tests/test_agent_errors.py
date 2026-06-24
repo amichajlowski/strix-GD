@@ -49,19 +49,11 @@ async def test_record_error_keeps_benign_path_readable() -> None:
     await coordinator.register("a1", "strix", parent_id=None)
 
     benign = "Failed to read /workspace/repo/app.py at line 42"
-    await coordinator.record_error(
-        "a1",
-        FileNotFoundError(benign),
-        cause="file missing",
-        suggested_fix="restore the file",
-    )
+    await coordinator.record_error("a1", FileNotFoundError(benign))
 
     last_error = coordinator.metadata["a1"]["last_error"]
     assert last_error["message"] == benign
     assert last_error["type"] == "FileNotFoundError"
-    assert last_error["cause"] == "file missing"
-    assert last_error["suggested_fix"] == "restore the file"
-    assert last_error["recoverable"] is True
     assert "occurred_at" in last_error
 
 

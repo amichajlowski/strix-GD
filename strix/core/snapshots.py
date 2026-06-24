@@ -19,12 +19,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-PREVIOUS_SNAPSHOT_SUFFIX = ".previous.json"
-
 
 def previous_snapshot_path(agents_path: Path) -> Path:
     """``.state/agents.json`` -> ``.state/agents.previous.json``."""
-    return agents_path.with_name(agents_path.name.removesuffix(".json") + PREVIOUS_SNAPSHOT_SUFFIX)
+    return agents_path.with_suffix(".previous.json")
 
 
 def _read_snapshot(path: Path) -> dict[str, Any] | None:

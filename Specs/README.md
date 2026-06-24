@@ -62,16 +62,13 @@ All specs use the same lightweight error record in agent metadata:
     "type": "RuntimeError",
     "message": "short scrubbed message",
     "status_code": 500,
-    "cause": "human-readable likely cause",
-    "suggested_fix": "one concise action",
-    "recoverable": true,
     "occurred_at": "ISO-8601 timestamp"
   }
 }
 ```
 
-Only `type`, `message`, and `occurred_at` are required. The rest are best effort. `recoverable` is
-display guidance only; retry availability is determined by whether the agent has an attached SDK
+Only `type`, `message`, and `occurred_at` are required. `status_code` is best effort and retained
+for investigability. Retry availability is determined by whether the agent has an attached SDK
 session or the run can be restarted.
 
 Capture as little as possible:
@@ -101,7 +98,7 @@ remain readable unless they contain credential-bearing values.
 
 Add a metadata-aware graph snapshot path, such as `graph_snapshot_with_metadata()`, that carries
 agent metadata and checkpoint warnings without breaking existing `graph_snapshot()` callers. Extend
-`TuiLiveView.upsert_agent()` to store structured `last_error` and checkpoint warnings, not only a
+`TuiLiveView.upsert_agent()` to store structured `last_error` and checkpoint warnings, rather than only a
 flat `error_message`.
 
 Run-level recovery statuses are plain `run.json` strings, not a new enum:
