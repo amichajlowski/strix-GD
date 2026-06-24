@@ -53,6 +53,17 @@ strix --target <target> [options]
   Run in headless mode without TUI. Ideal for CI/CD.
 </ParamField>
 
+<ParamField path="--resume" type="string">
+  Resume a prior scan by run name. Strix loads the original targets and run
+  configuration from `strix_runs/<run-name>/run.json`, so do not combine
+  `--resume` with `--target` or `--mount`.
+
+  If the agent snapshot is missing but `run.json` is still valid, Strix performs
+  a same-run root restart and preserves existing findings. If the run was
+  cancelled with findings kept, resume is refused because the agent replay state
+  was intentionally discarded.
+</ParamField>
+
 <ParamField path="--config" type="string">
   Path to a custom config file (JSON) to use instead of `~/.strix/cli-config.json`.
 </ParamField>
@@ -98,7 +109,30 @@ strix -t https://github.com/org/app -t https://staging.example.com
 
 # Large local repository — bind-mount instead of copying it in
 strix --mount ./huge-monorepo
+
+# Resume a saved run
+strix --resume app-directory-20260624-120000
 ```
+
+## Interactive Recovery
+
+In the TUI, failed, crashed, and error-stopped agents stay visible instead of
+forcing the whole audit to close. Select the red agent and press `Esc` to open
+the recovery actions:
+
+- `Retry`: sends a retry instruction to the selected agent when its SDK session
+  is still attached.
+- `Save for resume`: writes `run.json.status = paused`, keeps `.state`, and
+  exits cleanly. Resume later with `strix --resume <run-name>`.
+- `Cancel, keep findings`: saves findings and run metadata, then discards agent
+  replay state. This run cannot be resumed; start a fresh run to continue
+  testing.
+
+Resume uses the same run directory and keeps existing reports. Repository
+targets are cloned under `strix_runs/<run-name>/sources/` so resume no longer
+depends on temporary clone paths. Strix also writes
+`strix_runs/<run-name>/evidence_manifest.json` before sandbox cleanup with a
+small scrubbed summary of reports, source mappings, and cleanup status.
 
 ## Exit Codes
 

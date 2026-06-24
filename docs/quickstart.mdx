@@ -46,6 +46,17 @@ strix --target ./your-app
 First run pulls the Docker sandbox image automatically. Results are saved to `strix_runs/<run-name>`.
 </Note>
 
+## Resume A Run
+
+If an interactive audit is saved for later, resume it by run name:
+
+```bash
+strix --resume <run-name>
+```
+
+In the TUI, select a failed red agent and press `Esc` to retry it, save the run
+for resume, or cancel while keeping findings.
+
 ## Target Types
 
 Strix accepts multiple target types:

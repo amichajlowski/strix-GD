@@ -188,6 +188,22 @@ Run Strix programmatically without interactive UI using the `-n/--non-interactiv
 strix -n --target https://your-app.com
 ```
 
+### Resume And Recovery
+
+Interactive scans keep failed, crashed, and error-stopped agents visible in the
+TUI. Select the red agent and press `Esc` to retry it, save the run for later
+resume, or cancel the audit while keeping findings.
+
+```bash
+# Resume a saved run
+strix --resume <run-name>
+```
+
+Saved runs preserve findings and replay state under `strix_runs/<run-name>`.
+Repository targets are stored in the run-owned `sources/` directory, and Strix
+writes `evidence_manifest.json` before sandbox cleanup with scrubbed recovery
+context.
+
 ### CI/CD (GitHub Actions)
 
 Strix can be added to your pipeline to run a security test on pull requests with a lightweight GitHub Actions workflow:
