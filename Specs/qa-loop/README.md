@@ -32,8 +32,12 @@ The QA loop adds a review checkpoint before completion so these gaps are visible
 - Do not create a full coverage database for the MVP.
 - Do not use an internal LLM call inside the review tool.
 - Do not create an infinite loop.
+- Do not create a finish deadlock: acknowledged residual/out-of-scope gaps must provide a
+  deterministic exit path.
 - Persist only compact review results in `run.json`.
 - Store no raw secrets, cookies, tokens, request bodies, or client identifiers in the review result.
+- Scrub persisted free text with the existing structured-secret scrubber and drop proxy query
+  strings entirely.
 - Keep quick and standard scans fast; enforce the QA gate by default only for deep scans unless a
   later CLI flag explicitly expands this.
 

@@ -80,12 +80,19 @@ async def review_before_finish(
     ctx: RunContextWrapper,
     reason: str = "pre-finish audit quality review",
     max_priority_gaps: int = 5,
+    acknowledged_gaps: list[str] | None = None,
 ) -> str:
     ...
 ```
 
 Do not ask the agent to pass findings, tool history, or coverage manually. The tool should collect
 what it can from existing run state.
+
+`acknowledged_gaps` is the deterministic escape hatch. It accepts `gap_id` values from a previous
+review when the root agent has already handled the gap through other evidence, determined it is out
+of scope, or accepted it as residual risk. Acknowledged gaps move to `deferred_or_residual` and no
+longer block completion. The final report methodology or recommendations must mention any
+acknowledged high/critical gap.
 
 The JSON output should be stable and compact:
 
@@ -97,6 +104,7 @@ The JSON output should be stable and compact:
   "created_at": "2026-06-25T12:00:00Z",
   "reason": "pre-finish audit quality review",
   "summary": "Review found high-priority gaps in JWT validation and dependency CVE coverage.",
+  "acknowledged_gaps": [],
   "priority_gaps": [
     {
       "gap_id": "gap-001",
@@ -118,8 +126,12 @@ The JSON output should be stable and compact:
     "scan_mode": "deep",
     "vulnerability_count": 2,
     "agent_count": 8,
-    "unresolved_todo_count": 0,
-    "tool_call_count": 64
+    "unresolved_todo_count": 0
+  },
+  "diagnostics": {
+    "tool_history_available": true,
+    "agents_with_sessions": 8,
+    "agents_total": 8
   }
 }
 ```
@@ -138,9 +150,11 @@ Persist the latest review result under `run.json`:
     "created_at": "2026-06-25T12:00:00Z",
     "ready_to_finish": false,
     "summary": "...",
+    "acknowledged_gaps": [],
     "priority_gaps": [],
     "deferred_or_residual": [],
-    "review_metrics": {}
+    "review_metrics": {},
+    "diagnostics": {}
   }
 }
 ```
@@ -187,6 +201,12 @@ If the review exists but is not ready, return:
 }
 ```
 
+This must never become an audit deadlock. The root can call `review_before_finish` again with
+`acknowledged_gaps` after performing equivalent validation, deciding a gap is out of scope, or
+accepting it as residual risk. The updated review should record those acknowledged gaps under
+`deferred_or_residual`, set `ready_to_finish: true` if no unacknowledged high/critical gaps remain,
+and allow `finish_scan` to proceed.
+
 If the review is stale, return the same shape with:
 
 ```text
@@ -199,12 +219,15 @@ Keep stale detection cheap. The review is stale if current metrics differ from t
 `review_metrics` in any of these fields:
 
 - vulnerability count
-- agent count or terminal status digest
+- agent count
 - unresolved todo count
-- tool call count, if tool history is available
 
 Do not hash full transcripts. Do not compare full vulnerability content. The purpose is to catch
 material changes after the review, not to prove perfect immutability.
+
+Implement one shared helper such as `compute_review_metrics(report_state, coordinator)` and call it
+from both `review_before_finish` and the `finish_scan` gate. Do not recompute tool history in
+`finish_scan`; that is too expensive and too failure-prone for a completion guard.
 
 ## Scan Mode Behaviour
 
@@ -234,7 +257,7 @@ for this spec.
 Required sources:
 
 - `ReportState.vulnerability_reports`
-- `ReportState.run_record` and scan config fields
+- `ReportState.run_record` and `ReportState.scan_config`
 - `AgentCoordinator.graph_snapshot_with_metadata()`
 - unresolved todos via existing todo storage helpers
 - notes summaries via a small helper in `strix/tools/notes/tools.py`
@@ -248,6 +271,25 @@ Optional sources:
 If an optional source is unavailable, the review should continue and add a low-priority diagnostic
 warning. Optional source failure must not crash the audit.
 
+Target type mapping must use the actual scan config values:
+
+- web target: `web_application`
+- IP target: `ip_address`
+- source target: `repository` or `local_code`
+
+Read these from `get_global_report_state().scan_config["targets"][].type`, not from the agent
+context.
+
+Privacy rules are mandatory for every persisted free-text field in `qa_review`:
+
+- scrub every summary, gap reason, suggested action, evidence string, note title/preview, and
+  diagnostic with `strix.core.scrubbing.scrub_secrets`
+- prefer note title, category, and tags; if a preview is included, scrub and bound it
+- for proxy samples, store path only and drop query strings entirely
+- never call `view_request` for QA review context
+- never persist request/response bodies, headers, cookies, full command output, or raw client
+  identifiers
+
 ## Tool History, Without Overengineering
 
 Do not build a separate tool-run ledger for the MVP.
@@ -260,15 +302,22 @@ same idea into a small helper, for example:
 strix/core/tool_history.py
 ```
 
-The helper should return compact entries:
+The helper should return compact entries plus source health:
 
 ```json
 {
-  "agent_id": "root1234",
-  "tool_name": "exec_command",
-  "command": "nuclei",
-  "key_options": ["-t", "-tags", "-severity"],
-  "status": "completed"
+  "tool_history": [
+    {
+      "agent_id": "root1234",
+      "tool_name": "exec_command",
+      "command": "nuclei",
+      "key_options": ["-t", "-tags", "-severity"],
+      "status": "completed"
+    }
+  ],
+  "agents_total": 8,
+  "agents_with_sessions": 8,
+  "extraction_errors": []
 }
 ```
 
@@ -280,7 +329,9 @@ Rules:
 - Do not store full command output in `run.json`.
 - Scrub all command strings before storing summaries.
 - Drop environment variable assignments and values for sensitive-looking flags.
-- Limit history to a bounded count, e.g. newest 300 tool calls across agents.
+- Bound work per agent before merging, e.g. inspect only the newest N session items per attached
+  session, then merge and cap the final summaries.
+- If `agents_with_sessions == 0`, rules must treat tool history as unavailable rather than empty.
 
 ## Review Rules
 
@@ -295,20 +346,25 @@ strix/tools/qa_loop/rules.py
 
 Rules should inspect simple signals from notes, reports, paths, targets, and tool history.
 
+If tool history is unavailable (`agents_with_sessions == 0` or all session extraction failed),
+absence-based rules must not emit high/critical gaps. Instead, emit one low-priority diagnostic gap
+stating that tool evidence could not be inspected. This avoids treating extraction failure as proof
+that no tools were run.
+
 ### Baseline Recon Rules
 
-For web targets:
+For `web_application` targets:
 
 - If no path discovery or crawler activity is recorded, add a high gap.
 - Evidence of acceptable activity includes `katana`, `ffuf`, `dirsearch`, `gospider`,
   `list_sitemap`, or a meaningful proxy sitemap summary.
 
-For IP targets:
+For `ip_address` targets:
 
 - If no port/service discovery is recorded, add a high gap.
 - Evidence includes `nmap`, `naabu`, or equivalent commands.
 
-For source targets:
+For `repository` or `local_code` targets:
 
 - If no source triage is recorded, add a high gap.
 - Evidence includes `semgrep`, `sg`, Tree-sitter, `gitleaks`, `trufflehog`, `trivy fs`, `bandit`
@@ -332,7 +388,7 @@ matching validation evidence:
 
 ### CVE And Dependency Rules
 
-If the scan has a source target or technology/version signals:
+If the scan has a `repository` / `local_code` target or technology/version signals:
 
 - require at least one dependency/CVE check where relevant
 - evidence includes `trivy`, `npm audit`, `pip-audit`, `retire`, `vulnx`, `cvemap`,
@@ -355,12 +411,10 @@ Examples:
 - `ffuf` ran without extensions on a target that appears to serve files:
   medium gap.
 - `nmap` ran without service/version detection against an IP/service target:
-  high gap.
-- `sqlmap` ran once against a broad target without focused parameter evidence:
   medium gap.
 
-Do not block finish for every possible option. Raise only gaps that would likely change audit
-quality.
+All tool-option gaps are medium by default and therefore non-blocking. Raise only gaps that would
+likely change audit quality. Do not include a `sqlmap` option rule in the MVP.
 
 ## Root Agent Behaviour
 
@@ -371,6 +425,9 @@ Update `strix/skills/coordination/root_agent.md` or the main system prompt with 
 - Do not spawn more than three follow-up workstreams from one review unless the target is clearly
 large and active budget remains.
 - After follow-up work completes, call `review_before_finish` again.
+- If a high/critical gap was validated by other means, is out of scope, or is accepted as residual
+  risk, call `review_before_finish` with its `gap_id` in `acknowledged_gaps` and document it in the
+  final report.
 - If the review says ready, call `finish_scan`.
 - Include residual/deferred areas in the final methodology or recommendations where relevant.
 
@@ -426,4 +483,3 @@ QA review stores:
 ```
 
 `finish_scan` can complete.
-

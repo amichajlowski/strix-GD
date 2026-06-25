@@ -51,7 +51,9 @@ Areas to inspect carefully:
   blockers.
 - Whether deep scans are gated while quick/standard scans remain unaffected.
 - Whether stale review detection is clear enough and not too brittle.
+- Whether acknowledged/residual gaps provide a safe escape hatch without hiding real incomplete work.
 - Whether tool-history extraction from SDK sessions is realistic and safely bounded.
+- Whether the spec distinguishes "tool history unavailable" from "tool history available but empty".
 - Whether command/tool summaries avoid storing raw command output and secrets.
 - Whether notes/todos/proxy summaries are sufficiently bounded and safe.
 - Whether deterministic rule evaluation is enough for the MVP.
@@ -92,4 +94,3 @@ One of:
 - Ready after minor edits
 - Needs spec revision before implementation
 ```
-

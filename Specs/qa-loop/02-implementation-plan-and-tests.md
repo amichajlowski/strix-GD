@@ -58,6 +58,9 @@ self.run_record["qa_review"]
 ```
 
 Hydration should work automatically through existing `run.json` loading.
+`set_scan_config()` should clear any prior `qa_review` for a fresh/reconfigured run, or the stale
+review helper must reliably re-block it. Prefer clearing it unless resume tests prove that harms
+existing recovery behaviour.
 
 Acceptance criteria:
 
@@ -70,14 +73,15 @@ Acceptance criteria:
 
 Update `strix/core/runner.py`.
 
-Add to root and child context:
+Add to the root context dict in `runner.py`:
 
 ```python
 "scan_mode": scan_mode,
 "qa_loop_enabled": scan_mode == "deep",
 ```
 
-Children do not need the tool, but shared context is acceptable.
+Children inherit this context automatically through `dict(parent_ctx)` in `_start_child_runner()`.
+Do not edit `execution.py` solely to add these fields to children.
 
 Acceptance criteria:
 
@@ -116,8 +120,9 @@ The helper should extract compact tool call summaries from SDK sessions:
 async def summarise_agent_tool_history(
     coordinator: AgentCoordinator,
     *,
-    limit: int = 300,
-) -> list[dict[str, Any]]:
+    per_agent_item_limit: int = 400,
+    final_tool_limit: int = 300,
+) -> dict[str, Any]:
     ...
 ```
 
@@ -126,12 +131,14 @@ Implementation guidance:
 - iterate registered agent ids
 - use attached `runtime.session` when present
 - call `await session.get_items()`
+- slice to the newest `per_agent_item_limit` items before parsing each session
 - parse `function_call` items
 - join outputs only for status if cheap; do not persist full output
 - for `exec_command`, parse command basename and flags from `cmd`
 - use `shlex.split()` where possible
-- scrub raw command text with existing `strix.core.scrubbing.scrub_message`
+- scrub raw command text with existing `strix.core.scrubbing.scrub_secrets`
 - limit stored summaries
+- return source health fields: `agents_total`, `agents_with_sessions`, and `extraction_errors`
 
 Acceptance criteria:
 
@@ -140,18 +147,20 @@ Acceptance criteria:
 - extracts shell command basename and flags
 - redacts sensitive values
 - does not persist full command output
+- distinguishes "tool history unavailable" from "tool history available but empty"
+- bounds per-agent session reads before merging
 
 ### Task 6: Build Review Context
 
 In `review_before_finish`, collect:
 
-- scan mode and target types from report state
+- scan mode and target types from `get_global_report_state().scan_config`
 - vulnerability count and high-level finding metadata
 - agent graph with statuses and metadata
 - unresolved todo count and summaries
-- note titles/previews using a small exported helper from notes storage
+- note titles/categories/tags, with only scrubbed bounded previews if previews are kept
 - tool history summary
-- optional proxy sitemap summary if easily available
+- optional proxy sitemap summary if easily available, storing path only and dropping query strings
 
 Add small helpers if required:
 
@@ -161,13 +170,24 @@ todo_review_summary() -> dict[str, Any]
 ```
 
 Keep helpers compact. Do not expose raw note content by default; use title, category, tags, and a
-short preview.
+short scrubbed preview only if genuinely useful.
+
+Target type mapping is explicit:
+
+- web: `web_application`
+- IP: `ip_address`
+- source: `repository` or `local_code`
+
+Scrub every persisted free-text field with `strix.core.scrubbing.scrub_secrets`. Never persist raw
+proxy query strings, request/response bodies, headers, cookies, or full command outputs.
 
 Acceptance criteria:
 
 - review still works when notes/todos/proxy are empty
 - optional proxy failures are reported as diagnostics, not exceptions
 - context is bounded
+- note/proxy-derived secrets are absent from the persisted review
+- target type mapping uses actual `scan_config` values
 
 ### Task 7: Implement Rule Evaluation
 
@@ -184,9 +204,9 @@ def make_gap(...) -> dict[str, Any]: ...
 
 Minimum MVP rules:
 
-1. web target without recon/path discovery evidence
-2. IP target without port/service discovery evidence
-3. source target without source triage evidence
+1. `web_application` target without recon/path discovery evidence
+2. `ip_address` target without port/service discovery evidence
+3. `repository` or `local_code` target without source triage evidence
 4. source or version/package signal without CVE/dependency evidence
 5. GraphQL signal without GraphQL testing evidence
 6. JWT/auth token signal without JWT/auth-session testing evidence
@@ -196,18 +216,22 @@ Minimum MVP rules:
 
 Acceptance criteria:
 
+- if tool history is unavailable, absence-based rules emit one low diagnostic rather than high gaps
 - gaps are sorted critical, high, medium, low
 - only top `max_priority_gaps` are returned
-- `ready_to_finish` is false if high/critical gaps remain
+- `ready_to_finish` is false if unacknowledged high/critical gaps remain
+- acknowledged high/critical gaps move to `deferred_or_residual` and do not block
 - medium/low gaps are included as deferred/residual unless they are promoted by clear exposure
+- all tool-option gaps are medium and non-blocking by default
 
 ### Task 8: Persist Review Result
 
 `review_before_finish` should:
 
 - create a review id
-- calculate review metrics
+- calculate review metrics with a shared cheap helper
 - evaluate rules
+- apply `acknowledged_gaps`
 - build JSON output
 - persist the output via `ReportState.record_qa_review`
 - return the same JSON string to the root agent
@@ -217,6 +241,7 @@ Acceptance criteria:
 - returned and persisted review payloads match
 - payload contains no raw secret values from test fixtures
 - review result is concise enough for the root agent to act on
+- acknowledged high/critical gaps land in `deferred_or_residual`
 
 ### Task 9: Enforce Gate In finish_scan
 
@@ -234,11 +259,12 @@ Rules:
 - if `qa_loop_enabled` is false, no blocker
 - if no global report state, do not block solely on QA review because persistence is already degraded
 - if latest review missing, block
-- if latest review stale, block
+- if latest review stale according to the shared cheap metrics helper, block
 - if `ready_to_finish` is false, block with priority gaps
 - if ready, allow existing finish behaviour
 
 Do not remove existing blockers for unresolved agents or todos.
+Do not recompute tool history in `finish_scan`.
 
 Acceptance criteria:
 
@@ -246,6 +272,7 @@ Acceptance criteria:
 - deep scan with not-ready review cannot finish
 - deep scan with ready fresh review can finish
 - standard/quick scan can finish without review
+- acknowledged high/critical gaps can allow finish once the latest review records them as residual
 
 ### Task 10: Prompt Guidance
 
@@ -255,6 +282,8 @@ Update `strix/skills/coordination/root_agent.md` with concise instructions:
 - treat high/critical gaps as follow-up work
 - spawn at most three follow-up agents from one review by default
 - call `review_before_finish` again after follow-up
+- call `review_before_finish(acknowledged_gaps=[...])` only when a high/critical gap has been
+  validated through other evidence, is out of scope, or is explicitly accepted as residual risk
 - include residual risk in final report if relevant
 
 Do not add long maximalist prompt text.
@@ -303,7 +332,8 @@ Add tests before or with implementation. Prefer pure and mocked tests.
    - Assert raw values are absent and `XXXX` appears.
 
 5. `test_web_target_without_recon_gets_high_gap`
-   - Review context has web target and no crawler/path discovery tools.
+   - Review context has `web_application` target and available tool history but no crawler/path
+     discovery tools.
    - Assert high gap about recon/path discovery.
 
 6. `test_web_target_with_katana_or_ffuf_has_no_baseline_recon_gap`
@@ -311,7 +341,7 @@ Add tests before or with implementation. Prefer pure and mocked tests.
    - Assert baseline recon gap is absent.
 
 7. `test_source_target_without_source_triage_gets_high_gap`
-   - Source target, no semgrep/sg/trivy/secrets tools.
+   - `repository` or `local_code` target, no semgrep/sg/trivy/secrets tools.
    - Assert high source triage gap.
 
 8. `test_source_target_with_semgrep_and_trivy_satisfies_source_triage`
@@ -339,8 +369,8 @@ Add tests before or with implementation. Prefer pure and mocked tests.
     - Assert high access-control gap.
 
 13. `test_nmap_without_service_detection_flags_option_gap_for_ip_target`
-    - IP target with `nmap` but no `-sV`/service flag.
-    - Assert high option gap.
+   - IP target with `nmap` but no `-sV`/service flag.
+   - Assert medium non-blocking option gap.
 
 14. `test_nuclei_default_run_with_known_technology_flags_medium_gap`
     - Technology signal exists.
@@ -352,50 +382,88 @@ Add tests before or with implementation. Prefer pure and mocked tests.
     - Assert review is ready.
 
 16. `test_priority_gaps_are_capped`
-    - Create context triggering many gaps.
-    - Assert only `max_priority_gaps` are returned.
+   - Create context triggering many gaps.
+   - Assert only `max_priority_gaps` are returned.
+
+17. `test_acknowledged_high_gap_allows_ready_and_lands_in_residual`
+   - Trigger a high gap.
+   - Re-run review with that `gap_id` in `acknowledged_gaps`.
+   - Assert `ready_to_finish` is true and the gap is present in `deferred_or_residual`.
+
+18. `test_tool_history_unavailable_does_not_fire_false_recon_gaps`
+   - Review context has targets but `agents_with_sessions == 0`.
+   - Assert no high recon/source/CVE absence gaps are emitted and one low diagnostic appears.
+
+19. `test_review_does_not_persist_note_or_query_secrets`
+   - Fixture note and proxy path contain sensitive-looking query values.
+   - Assert raw values are absent, `XXXX` appears where relevant, and proxy samples contain no query
+     string.
+
+20. `test_target_type_mapping_repository_counts_as_source`
+   - Use actual target type `repository`.
+   - Assert source triage rules apply.
+
+21. `test_tool_history_bounds_per_agent_before_merge`
+   - Fake a session with many old items and one newest item.
+   - Assert only bounded newest items are parsed before final merge.
+
+22. `test_review_continues_when_proxy_unavailable`
+   - Fake optional proxy/Caido summary failure.
+   - Assert review still succeeds with a low diagnostic and no exception.
+
+23. `test_set_scan_config_clears_or_reblocks_stale_qa_review`
+   - Persist a ready review.
+   - Call `set_scan_config()` with a new config.
+   - Assert either `qa_review` is cleared or the stale helper blocks completion.
 
 ### Existing Or New Test File: `tests/test_finish_scan_guards.py`
 
-17. `test_deep_completion_blocks_without_qa_review`
+24. `test_deep_completion_blocks_without_qa_review`
     - Root context has `qa_loop_enabled=True`.
     - Existing blockers empty.
     - Assert `finish_scan` returns `scan_completed: false` and required tool.
 
-18. `test_deep_completion_blocks_not_ready_qa_review`
+25. `test_deep_completion_blocks_not_ready_qa_review`
     - Persist review with `ready_to_finish=False`.
     - Assert `finish_scan` blocks and returns priority gaps.
 
-19. `test_deep_completion_allows_ready_fresh_qa_review`
+26. `test_deep_completion_allows_ready_fresh_qa_review`
     - Persist review with `ready_to_finish=True` and matching metrics.
     - Assert `finish_scan` succeeds.
 
-20. `test_standard_completion_does_not_require_qa_review`
+27. `test_standard_completion_does_not_require_qa_review`
     - Context has `qa_loop_enabled=False`.
     - Assert existing completion path still works.
 
-21. `test_stale_qa_review_blocks_finish_after_new_vulnerability`
+28. `test_stale_qa_review_blocks_finish_after_new_vulnerability`
     - Persist ready review with vulnerability_count 0.
     - Add vulnerability to report state or mock current metric count 1.
     - Assert finish blocks as stale.
 
-22. `test_existing_unresolved_agent_blockers_still_win`
+29. `test_review_metrics_identical_between_tool_and_finish_gate`
+    - Use the shared helper from both review creation and finish gating.
+    - Assert the same current metrics are produced.
+
+30. `test_existing_unresolved_agent_blockers_still_win`
     - Have unresolved child agent and ready QA review.
     - Assert finish still blocks on unresolved agent.
 
 ### Factory Tests
 
-23. `test_root_agent_includes_review_before_finish_tool`
-    - Build root agent with monkeypatched sandbox dependencies if needed.
-    - Assert tool name exists.
+31. `test_root_agent_includes_review_before_finish_tool`
+    - Prefer factoring root/child tool selection into a tiny pure helper and testing that helper.
+    - Assert tool name exists in root tools.
 
-24. `test_child_agent_does_not_include_review_before_finish_tool`
-    - Build child agent.
-    - Assert tool name is absent.
+32. `test_child_agent_does_not_include_review_before_finish_tool`
+    - Use the same pure helper.
+    - Assert tool name is absent from child tools.
+
+33. `test_child_finish_is_not_qa_gated`
+    - Ensure `agent_finish` remains unaffected by `qa_loop_enabled` in inherited context.
 
 ### Prompt/Documentation Tests
 
-25. `test_root_agent_skill_mentions_review_before_finish`
+34. `test_root_agent_skill_mentions_review_before_finish`
     - Read `strix/skills/coordination/root_agent.md`.
     - Assert it mentions `review_before_finish` and `finish_scan`.
 
@@ -430,4 +498,3 @@ Expected behaviour:
 
 Use only authorised test targets. Replace any identifiers, credentials, domains, or client names
 with `XXXX` in examples and logs.
-
