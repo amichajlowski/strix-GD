@@ -78,3 +78,28 @@ async def test_mark_running_clears_last_error() -> None:
 
     assert "last_error" not in coordinator.metadata["a1"]
     assert coordinator.statuses["a1"] == "running"
+
+
+async def test_systemic_error_summary_groups_repeated_terminal_errors() -> None:
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+    for index in range(3):
+        agent_id = f"child-{index}"
+        await coordinator.register(agent_id, f"child {index}", parent_id="root")
+        exc = RuntimeError("empty_stream")
+        exc.status_code = 500  # type: ignore[attr-defined]
+        await coordinator.record_error(agent_id, exc)
+        await coordinator.set_status(agent_id, "failed")
+
+    summary = await coordinator.systemic_error_summary(threshold=3)
+
+    assert summary is not None
+    assert summary["count"] == 3
+    assert summary["error"]["type"] == "RuntimeError"
+    assert summary["error"]["message"] == "empty_stream"
+    assert summary["error"]["status_code"] == 500
+    assert {agent["agent_id"] for agent in summary["agents"]} == {
+        "child-0",
+        "child-1",
+        "child-2",
+    }

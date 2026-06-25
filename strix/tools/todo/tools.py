@@ -124,6 +124,60 @@ def _sorted_todos(agent_id: str) -> list[dict[str, Any]]:
     return todos_list
 
 
+def unresolved_todos_summary(
+    agent_ids: set[str] | None = None,
+    *,
+    limit_per_agent: int = 5,
+) -> list[dict[str, Any]]:
+    """Return compact unfinished-todo summaries for completion guards."""
+    agent_filter = {str(agent_id) for agent_id in agent_ids} if agent_ids is not None else None
+    limit = max(0, limit_per_agent)
+    summaries: list[dict[str, Any]] = []
+
+    with _todos_io_lock:
+        for agent_id, by_id in sorted(_todos_storage.items()):
+            if agent_filter is not None and agent_id not in agent_filter:
+                continue
+
+            unresolved: list[dict[str, Any]] = []
+            counts = {"pending": 0, "in_progress": 0}
+            for todo_id, todo in by_id.items():
+                status = str(todo.get("status", "pending"))
+                if status == "done":
+                    continue
+                if status in counts:
+                    counts[status] += 1
+                entry = todo.copy()
+                entry["todo_id"] = todo_id
+                unresolved.append(entry)
+
+            if not unresolved:
+                continue
+
+            unresolved.sort(key=_todo_sort_key)
+            todos = [
+                {
+                    "todo_id": str(todo.get("todo_id", "")),
+                    "title": str(todo.get("title", "")),
+                    "status": str(todo.get("status", "pending")),
+                    "priority": str(todo.get("priority", "normal")),
+                }
+                for todo in unresolved[:limit]
+            ]
+            summaries.append(
+                {
+                    "agent_id": agent_id,
+                    "total_unresolved": len(unresolved),
+                    "pending": counts["pending"],
+                    "in_progress": counts["in_progress"],
+                    "todos": todos,
+                    "omitted": max(0, len(unresolved) - len(todos)),
+                }
+            )
+
+    return summaries
+
+
 def _normalize_todo_ids(raw_ids: Any) -> list[str]:
     if raw_ids is None:
         return []

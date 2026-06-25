@@ -10,6 +10,7 @@ from typing import Any
 from agents import RunContextWrapper, function_tool
 
 from strix.core.agents import coordinator_from_context
+from strix.tools.todo.tools import unresolved_todos_summary
 
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,24 @@ def _do_finish(
         }
 
 
+async def _completion_blockers(inner: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    coordinator = coordinator_from_context(inner)
+    me = inner.get("agent_id")
+    parent_id = inner.get("parent_id")
+    if coordinator is None or parent_id is not None or not isinstance(me, str):
+        return {"unresolved_agents": [], "unresolved_todos": []}
+
+    unresolved_agents = await coordinator.unresolved_agents_except(me)
+    todo_agent_ids = {me}
+    todo_agent_ids.update(
+        str(agent["agent_id"]) for agent in unresolved_agents if "agent_id" in agent
+    )
+    return {
+        "unresolved_agents": unresolved_agents,
+        "unresolved_todos": unresolved_todos_summary(todo_agent_ids),
+    }
+
+
 @function_tool(timeout=60)
 async def finish_scan(
     ctx: RunContextWrapper,
@@ -99,18 +118,23 @@ async def finish_scan(
     **Pre-flight checklist (mandatory — do not skip):**
 
     1. **Call ``view_agent_graph`` first.** Inspect every entry in the
-       summary. If ANY agent is in ``running`` / ``waiting`` state,
-       you MUST NOT call ``finish_scan`` yet —
-       wrap them up first via ``send_message_to_agent`` (ask them to
-       finish), ``wait_for_message`` (block until their report
-       arrives), or ``stop_agent`` (graceful cancel). Only ``completed``
-       / ``crashed`` / ``stopped`` agents are safe to leave behind.
-       Calling ``finish_scan`` while children are alive orphans their
-       work and produces an incomplete report.
-    2. All vulnerabilities you found are filed via
+       summary. If ANY agent is ``running`` / ``waiting`` /
+       ``failed`` / ``crashed`` — or ``stopped`` with a recorded error —
+       you MUST NOT call ``finish_scan`` yet. Wrap active agents up via
+       ``send_message_to_agent`` (ask them to finish),
+       ``wait_for_message`` (block until their report arrives), or
+       ``stop_agent`` (graceful cancel). Retry, reassign, or explicitly
+       cancel failed/error agents for resume before finishing. Only
+       ``completed`` agents and deliberate clean ``stopped`` agents are
+       safe to leave behind.
+    2. Your root todo list and unresolved failed/error agents' todo
+       lists must have no pending or in-progress work. Mark completed
+       work done, delete abandoned todos, or reassign the work before
+       finalising.
+    3. All vulnerabilities you found are filed via
        ``create_vulnerability_report`` (un-reported findings are not
        tracked and not credited).
-    3. Don't double-report — one report per distinct vulnerability.
+    4. Don't double-report — one report per distinct vulnerability.
 
     **Calling this multiple times overwrites the previous report.**
     Make the single call comprehensive.
@@ -147,24 +171,23 @@ async def finish_scan(
         recommendations: Prioritized, actionable remediation.
     """
     inner = ctx.context if isinstance(ctx.context, dict) else {}
-    coordinator = coordinator_from_context(inner)
     me = inner.get("agent_id")
     parent_id = inner.get("parent_id")
-    if coordinator is not None and parent_id is None and me is not None:
-        active_agents = await coordinator.active_agents_except(me)
-    else:
-        active_agents = []
+    coordinator = coordinator_from_context(inner)
+    blockers = await _completion_blockers(inner)
 
-    if active_agents:
+    if blockers["unresolved_agents"] or blockers["unresolved_todos"]:
         return json.dumps(
             {
                 "success": False,
                 "scan_completed": False,
                 "error": (
-                    "Cannot finish scan while child agents are still active. "
-                    "Wait for completion, send them finish instructions, or stop them first"
+                    "Cannot finish scan while unresolved agent work remains. "
+                    "Resolve failed/crashed/error-stopped agents and finish, delete, "
+                    "or reassign open todos first"
                 ),
-                "active_agents": active_agents,
+                "unresolved_agents": blockers["unresolved_agents"],
+                "unresolved_todos": blockers["unresolved_todos"],
             },
             ensure_ascii=False,
             default=str,

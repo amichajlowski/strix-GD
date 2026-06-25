@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 Status = Literal["running", "waiting", "completed", "stopped", "crashed", "failed"]
+_ACTIVE_STATUSES = {"running", "waiting"}
+_UNRESOLVED_STATUSES = {"running", "waiting", "failed", "crashed"}
 
 
 @dataclass(slots=True)
@@ -274,18 +276,103 @@ class AgentCoordinator:
             if runtime.stream is stream:
                 runtime.stream = None
 
+    def _agent_summary_locked(self, agent_id: str, status: str) -> dict[str, Any]:
+        entry: dict[str, Any] = {
+            "agent_id": agent_id,
+            "name": self.names.get(agent_id, agent_id),
+            "status": status,
+            "parent_id": self.parent_of.get(agent_id),
+        }
+        last_error = self.metadata.get(agent_id, {}).get("last_error")
+        if isinstance(last_error, dict):
+            error_payload: dict[str, Any] = {
+                "type": scrub_message(str(last_error.get("type", "UnknownError"))),
+                "message": scrub_message(str(last_error.get("message", ""))),
+            }
+            status_code = last_error.get("status_code")
+            if isinstance(status_code, int):
+                error_payload["status_code"] = status_code
+            entry["last_error"] = error_payload
+        return entry
+
     async def active_agents_except(self, agent_id: str) -> list[dict[str, Any]]:
         async with self._lock:
             return [
-                {
-                    "agent_id": aid,
-                    "name": self.names.get(aid, aid),
-                    "status": status,
-                    "parent_id": self.parent_of.get(aid),
-                }
+                self._agent_summary_locked(aid, status)
                 for aid, status in self.statuses.items()
-                if aid != agent_id and status in {"running", "waiting"}
+                if aid != agent_id and status in _ACTIVE_STATUSES
             ]
+
+    async def unresolved_agents_except(self, agent_id: str) -> list[dict[str, Any]]:
+        """Return agents that must be resolved before the root can finish.
+
+        ``stopped`` agents block only when they stopped after a recorded
+        terminal error; a deliberate user stop remains resumable/cancellable
+        state and is safe to leave behind.
+        """
+        async with self._lock:
+            unresolved: list[dict[str, Any]] = []
+            for aid, status in self.statuses.items():
+                if aid == agent_id:
+                    continue
+                last_error = self.metadata.get(aid, {}).get("last_error")
+                error_stopped = status == "stopped" and isinstance(last_error, dict)
+                if status in _UNRESOLVED_STATUSES or error_stopped:
+                    unresolved.append(self._agent_summary_locked(aid, status))
+            return unresolved
+
+    async def active_child_count(self, parent_id: str) -> int:
+        async with self._lock:
+            return sum(
+                1
+                for aid, status in self.statuses.items()
+                if self.parent_of.get(aid) == parent_id and status in _ACTIVE_STATUSES
+            )
+
+    async def systemic_error_summary(self, *, threshold: int) -> dict[str, Any] | None:
+        """Summarise repeated terminal errors across agents.
+
+        Used as a circuit breaker for provider/runtime failures. The payload
+        intentionally carries only scrubbed error fields already recorded by
+        :meth:`record_error`.
+        """
+        threshold = max(threshold, 1)
+        async with self._lock:
+            grouped: dict[tuple[str, int | None, str], list[str]] = {}
+            for aid, status in self.statuses.items():
+                last_error = self.metadata.get(aid, {}).get("last_error")
+                if not isinstance(last_error, dict):
+                    continue
+                terminal = status in {"failed", "crashed"} or status == "stopped"
+                if not terminal:
+                    continue
+                error_type = scrub_message(str(last_error.get("type", "UnknownError")))
+                message = scrub_message(str(last_error.get("message", "")))
+                status_code_raw = last_error.get("status_code")
+                status_code = status_code_raw if isinstance(status_code_raw, int) else None
+                grouped.setdefault((error_type, status_code, message), []).append(aid)
+
+            if not grouped:
+                return None
+            (error_type, status_code, message), agent_ids = max(
+                grouped.items(),
+                key=lambda item: len(item[1]),
+            )
+            if len(agent_ids) < threshold:
+                return None
+
+            error: dict[str, Any] = {"type": error_type, "message": message}
+            if status_code is not None:
+                error["status_code"] = status_code
+            return {
+                "count": len(agent_ids),
+                "threshold": threshold,
+                "error": error,
+                "agents": [
+                    self._agent_summary_locked(aid, self.statuses.get(aid, "unknown"))
+                    for aid in agent_ids
+                ],
+            }
 
     async def graph_snapshot(
         self,

@@ -9,6 +9,10 @@ import pytest
 
 from strix.core.agents import AgentCoordinator
 from strix.core.execution import _notify_parent_on_terminal_error
+from strix.tools.agents_graph.tools import (
+    _MAX_ACTIVE_CHILDREN_PER_PARENT,
+    _spawn_guard_response,
+)
 
 
 class _FakeSession:
@@ -63,3 +67,34 @@ async def test_noninteractive_parent_wait_unblocks_on_child_failure_message() ->
     await _notify_parent_on_terminal_error(coordinator, "child", "failed")
 
     await asyncio.wait_for(waiter, timeout=1.0)
+
+
+async def test_spawn_guard_blocks_repeated_terminal_errors() -> None:
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+    for index in range(3):
+        agent_id = f"child-{index}"
+        await coordinator.register(agent_id, f"child {index}", parent_id="root")
+        await coordinator.record_error(agent_id, RuntimeError("empty_stream"))
+        await coordinator.set_status(agent_id, "failed")
+
+    response = await _spawn_guard_response(coordinator=coordinator, parent_id="root")
+
+    assert response is not None
+    assert response["success"] is False
+    assert response["agent_id"] is None
+    assert response["systemic_error"]["count"] == 3
+
+
+async def test_spawn_guard_blocks_excessive_active_children() -> None:
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+    for index in range(_MAX_ACTIVE_CHILDREN_PER_PARENT):
+        await coordinator.register(f"child-{index}", f"child {index}", parent_id="root")
+
+    response = await _spawn_guard_response(coordinator=coordinator, parent_id="root")
+
+    assert response is not None
+    assert response["success"] is False
+    assert response["agent_id"] is None
+    assert response["active_children"] == _MAX_ACTIVE_CHILDREN_PER_PARENT

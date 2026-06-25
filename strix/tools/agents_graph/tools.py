@@ -12,11 +12,13 @@ from typing import Any, Literal, get_args
 
 from agents import RunContextWrapper, function_tool
 
-from strix.core.agents import Status, coordinator_from_context
+from strix.core.agents import AgentCoordinator, Status, coordinator_from_context
 from strix.skills import validate_requested_skills
 
 
 _ACTIVE_STATUSES: frozenset[str] = frozenset({"running", "waiting"})
+_MAX_ACTIVE_CHILDREN_PER_PARENT = 12
+_SYSTEMIC_ERROR_THRESHOLD = 3
 
 
 logger = logging.getLogger(__name__)
@@ -216,6 +218,39 @@ def _session_items_payload(items: list[Any]) -> list[dict[str, Any]]:
         else:
             payload.append({"content": str(item)})
     return payload
+
+
+async def _spawn_guard_response(
+    *,
+    coordinator: AgentCoordinator,
+    parent_id: str,
+) -> dict[str, Any] | None:
+    systemic_error = await coordinator.systemic_error_summary(threshold=_SYSTEMIC_ERROR_THRESHOLD)
+    if systemic_error is not None:
+        return {
+            "success": False,
+            "agent_id": None,
+            "error": (
+                "Multiple agents have hit the same terminal error; pause recovery "
+                "before spawning more agents"
+            ),
+            "systemic_error": systemic_error,
+        }
+
+    active_children = await coordinator.active_child_count(parent_id)
+    if active_children >= _MAX_ACTIVE_CHILDREN_PER_PARENT:
+        return {
+            "success": False,
+            "agent_id": None,
+            "error": (
+                "Too many active child agents; wait for current workstreams before "
+                "spawning more"
+            ),
+            "active_child_limit": _MAX_ACTIVE_CHILDREN_PER_PARENT,
+            "active_children": active_children,
+        }
+
+    return None
 
 
 @function_tool(timeout=601)
@@ -427,6 +462,10 @@ async def create_agent(
             ensure_ascii=False,
             default=str,
         )
+
+    spawn_guard = await _spawn_guard_response(coordinator=coordinator, parent_id=str(parent_id))
+    if spawn_guard is not None:
+        return json.dumps(spawn_guard, ensure_ascii=False, default=str)
 
     parent_history = list(ctx.turn_input) if inherit_context and ctx.turn_input else []
     try:
