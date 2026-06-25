@@ -1,0 +1,99 @@
+# QA Loop Handover Prompt
+
+Use this prompt with the slash loop command for implementation.
+
+```text
+/loop
+
+Objective:
+Implement the Strix QA loop pre-finish review gate exactly as specified in
+Specs/qa-loop/README.md, Specs/qa-loop/01-architecture.md, and
+Specs/qa-loop/02-implementation-plan-and-tests.md.
+
+Business reason:
+Deep Strix audits can currently finish even when important application paths, attack vectors, CVE
+checks, or relevant tool options were missed. The feature adds a lightweight quality review before
+completion so high-value gaps are run or documented before the final report.
+
+Implementation style:
+Keep it functional, small, and not overengineered. Add one root-only tool named
+review_before_finish. Reuse existing report state, agent coordinator state, todos, notes, SDK
+sessions, and proxy data where available. Do not create a workflow engine, a separate persistence
+service, or a large coverage database.
+
+Primary files to modify or create:
+- strix/tools/qa_loop/__init__.py
+- strix/tools/qa_loop/tool.py
+- strix/tools/qa_loop/rules.py
+- strix/core/tool_history.py
+- strix/report/state.py
+- strix/core/runner.py
+- strix/agents/factory.py
+- strix/tools/finish/tool.py
+- strix/skills/coordination/root_agent.md
+- tests/test_qa_loop_review.py
+- tests/test_finish_scan_guards.py
+
+Required behaviour:
+1. Root agents can call review_before_finish.
+2. Subagents cannot call review_before_finish.
+3. review_before_finish collects bounded review context from existing artefacts.
+4. review_before_finish evaluates simple deterministic rules for missed recon, app paths, CVE checks,
+   and tool option gaps.
+5. review_before_finish persists the latest result in run.json under qa_review.
+6. Deep scans cannot finish unless qa_review.ready_to_finish is true and fresh.
+7. Quick and standard scans must not be blocked by missing qa_review.
+8. Existing finish_scan blockers for unresolved agents and todos must keep working.
+9. The review must not persist raw secrets, cookies, tokens, request bodies, full command outputs, or
+   client identifiers.
+10. Prompt guidance must tell the root agent to call review_before_finish before finish_scan and run
+    only high-value follow-up gaps.
+
+Rule MVP:
+- web target without path discovery/crawler evidence -> high gap
+- IP target without port/service discovery evidence -> high gap
+- source target without source triage evidence -> high gap
+- source/package/version signal without dependency/CVE evidence -> medium/high gap
+- GraphQL signal without GraphQL testing evidence -> high gap
+- JWT/auth token signal without JWT/auth testing evidence -> high gap
+- upload/file signal without upload/file handling evidence -> high/medium gap
+- admin/user/id/tenant signal without access-control/IDOR evidence -> high gap
+- nmap without service/version detection on IP target -> high option gap
+- nuclei default run with known technology signal -> medium option gap
+- ffuf without useful path/file options when file-like paths are in scope -> medium option gap
+
+Testing objectives:
+Implement the tests listed in Specs/qa-loop/02-implementation-plan-and-tests.md. At minimum, include
+unit tests for rule evaluation, tool history summarisation, review persistence, finish_scan gating,
+and root-only tool registration.
+
+Suggested implementation sequence:
+1. Add tests for pure rule evaluation and review persistence.
+2. Implement ReportState qa_review methods.
+3. Implement tool_history summariser with safe redaction and bounded output.
+4. Implement qa_loop rules.
+5. Implement review_before_finish tool and persistence.
+6. Register the tool for root agents only.
+7. Add scan_mode and qa_loop_enabled to runner context.
+8. Enforce the finish_scan gate for deep scans.
+9. Update root-agent prompt guidance.
+10. Run the targeted tests, then the full suite if feasible.
+
+Stop conditions:
+- Do not proceed if implementation requires a new persistence service.
+- Do not add broad CLI changes unless all backend behaviour is already passing.
+- Do not store raw sensitive values in qa_review.
+- Do not weaken existing finish_scan unresolved-agent or unresolved-todo guards.
+- Do not change quick/standard scan completion semantics.
+
+Verification commands:
+uv run pytest tests/test_qa_loop_review.py tests/test_finish_scan_guards.py
+uv run pytest
+make lint
+make type-check
+
+Final response requirements:
+Summarise changed files, tests run, and any skipped tests. Note any residual risk or TODOs clearly.
+Use British English and anonymise personal or client identifiers as XXXX.
+```
+
