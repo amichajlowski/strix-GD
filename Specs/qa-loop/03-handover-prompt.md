@@ -51,11 +51,20 @@ Required behaviour:
 11. Prompt guidance must tell the root agent to call review_before_finish before finish_scan and run
     only high-value follow-up gaps.
 
+Required gap id and acknowledgement behaviour:
+- Derive each gap_id deterministically from rule + area, for example "{rule_key}:{area_key}".
+- Never use counters, timestamps, random suffixes, list positions, or generated ids for gap_id.
+- review_before_finish must union newly acknowledged ids with any previously persisted
+  qa_review.acknowledged_gaps before filtering gaps.
+- Acknowledged gaps must move to deferred_or_residual and must not remain in priority_gaps.
+
 Required privacy handling:
-- Scrub every persisted free-text field with strix.core.scrubbing.scrub_secrets.
+- Scrub and length-bound every persisted free-text field with strix.core.scrubbing.scrub_secrets.
 - For proxy samples store path only. Never persist req.query. Never call view_request for QA review
   context.
-- Prefer note title/category/tags over content preview. If a note preview is kept, scrub and bound it.
+- For the MVP do not persist note previews, raw note content, or raw note titles. Persist note ids,
+  categories, and scrubbed bounded tags only. Rule evaluation may inspect notes in memory, but
+  qa_review must not echo note free text verbatim.
 
 Required target mapping:
 - web = scan_config target type web_application
@@ -67,7 +76,11 @@ Required tool-history semantics:
 - Distinguish "tool history unavailable" from "tool history available but empty".
 - If agents_with_sessions == 0 or extraction fails for all sessions, absence-based rules must emit
   one low diagnostic instead of high recon/source/CVE gaps.
+- If extraction_errors is non-empty but some sessions were read, absence-based gaps must be medium
+  and non-blocking, with a partial-history diagnostic.
 - Bound history per agent before merging: inspect only newest N session items per agent, then merge.
+- await session.get_items() materialises the full SDK session before local slicing. That is acceptable
+  only inside review_before_finish; never do this inside finish_scan.
 
 Rule MVP:
 - web_application target without path discovery/crawler evidence -> high gap if tool history is available
@@ -99,6 +112,11 @@ Suggested implementation sequence:
 8. Enforce the finish_scan gate for deep scans.
 9. Update root-agent prompt guidance.
 10. Run the targeted tests, then the full suite if feasible.
+
+Resume/reconfiguration behaviour:
+- Do not clear qa_review in set_scan_config just because a scan is resumed.
+- Let the shared cheap stale-metrics helper decide whether the persisted qa_review is still valid.
+- Add tests for matching metrics allowing finish and changed metrics re-blocking.
 
 Stop conditions:
 - Do not proceed if implementation requires a new persistence service.

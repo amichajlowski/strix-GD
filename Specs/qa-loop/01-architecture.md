@@ -94,6 +94,16 @@ of scope, or accepted it as residual risk. Acknowledged gaps move to `deferred_o
 longer block completion. The final report methodology or recommendations must mention any
 acknowledged high/critical gap.
 
+`gap_id` values must be deterministic. Derive them from the stable identity of the rule and area,
+for example `"{rule_key}:{area_key}"`, where both parts are lower-case slugs. Never use counters,
+timestamps, random suffixes, list positions, or generated ids. The same underlying gap must produce
+the same `gap_id` across review calls, even if other gaps are resolved or newly discovered.
+
+`review_before_finish` must treat acknowledgements as cumulative. It should union the new
+`acknowledged_gaps` input with `get_latest_qa_review()["acknowledged_gaps"]` before filtering gaps,
+then persist the union. A gap whose id is acknowledged must appear in `deferred_or_residual` and must
+not also remain in `priority_gaps`.
+
 The JSON output should be stable and compact:
 
 ```json
@@ -107,12 +117,12 @@ The JSON output should be stable and compact:
   "acknowledged_gaps": [],
   "priority_gaps": [
     {
-      "gap_id": "gap-001",
+      "gap_id": "auth_jwt:jwt_authentication",
       "priority": "high",
       "area": "JWT authentication",
       "reason": "JWT/session handling was observed, but no JWT-specific validation was recorded.",
       "suggested_action": "Run focused JWT validation for algorithm confusion, weak secrets, expiry and claim tampering.",
-      "evidence": ["note:auth-token", "tool_history:no-jwt-tool"],
+      "evidence": ["note:note123", "tool_history:no-jwt-tool"],
       "suggested_skills": ["authentication_jwt"]
     }
   ],
@@ -260,7 +270,7 @@ Required sources:
 - `ReportState.run_record` and `ReportState.scan_config`
 - `AgentCoordinator.graph_snapshot_with_metadata()`
 - unresolved todos via existing todo storage helpers
-- notes summaries via a small helper in `strix/tools/notes/tools.py`
+- note ids, categories, and scrubbed/bounded tags via a small helper in `strix/tools/notes/tools.py`
 - SDK session tool calls from attached agent sessions where available
 
 Optional sources:
@@ -282,13 +292,19 @@ context.
 
 Privacy rules are mandatory for every persisted free-text field in `qa_review`:
 
-- scrub every summary, gap reason, suggested action, evidence string, note title/preview, and
+- scrub and length-bound every summary, gap reason, suggested action, evidence string, and
   diagnostic with `strix.core.scrubbing.scrub_secrets`
-- prefer note title, category, and tags; if a preview is included, scrub and bound it
+- do not persist note previews in the MVP
+- do not persist raw note content or raw note titles in `qa_review`; use note ids, categories, and
+  scrubbed/bounded tags as evidence references instead
+- rule evaluation may inspect notes in memory, but persisted review payloads must not echo note
+  free text verbatim
 - for proxy samples, store path only and drop query strings entirely
 - never call `view_request` for QA review context
 - never persist request/response bodies, headers, cookies, full command output, or raw client
   identifiers
+- `scrub_secrets` is structured-secret redaction, not general PII detection; avoid persisting
+  unstructured free text wherever possible
 
 ## Tool History, Without Overengineering
 
@@ -332,6 +348,9 @@ Rules:
 - Bound work per agent before merging, e.g. inspect only the newest N session items per attached
   session, then merge and cap the final summaries.
 - If `agents_with_sessions == 0`, rules must treat tool history as unavailable rather than empty.
+- `await session.get_items()` still materialises the session before local slicing because the SDK
+  exposes no limit argument. This is acceptable only because tool-history extraction runs inside
+  `review_before_finish`, never inside `finish_scan`.
 
 ## Review Rules
 
@@ -350,6 +369,10 @@ If tool history is unavailable (`agents_with_sessions == 0` or all session extra
 absence-based rules must not emit high/critical gaps. Instead, emit one low-priority diagnostic gap
 stating that tool evidence could not be inspected. This avoids treating extraction failure as proof
 that no tools were run.
+
+If tool history is partially available but `extraction_errors` is non-empty, absence-based gaps must
+be downgraded to medium and a diagnostic must state that tool history coverage is partial. Partial
+history is useful signal but not authoritative enough to block finish.
 
 ### Baseline Recon Rules
 
