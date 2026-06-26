@@ -41,6 +41,7 @@ from strix.tools.proxy.tools import (
     view_request,
     view_sitemap_entry,
 )
+from strix.tools.qa_loop.tool import review_before_finish
 from strix.tools.reporting.tool import create_vulnerability_report
 from strix.tools.thinking.tool import think
 from strix.tools.todo.tools import (
@@ -349,6 +350,13 @@ _BASE_TOOLS: tuple[Tool, ...] = (
 )
 
 
+def select_tools(*, is_root: bool) -> list[Tool]:
+    """Root/child tool selection. Only root agents get the QA review + finish gate."""
+    if is_root:
+        return [*_BASE_TOOLS, review_before_finish, finish_scan]
+    return [*_BASE_TOOLS, agent_finish]
+
+
 def build_strix_agent(
     *,
     name: str = "strix",
@@ -375,10 +383,7 @@ def build_strix_agent(
         system_prompt_context=system_prompt_context,
     )
 
-    if is_root:
-        tools: list[Tool] = [*_BASE_TOOLS, finish_scan]
-    else:
-        tools = [*_BASE_TOOLS, agent_finish]
+    tools: list[Tool] = select_tools(is_root=is_root)
 
     logger.info(
         "Built %s agent '%s' (skills=%d, tools=%d, scan_mode=%s, whitebox=%s)",

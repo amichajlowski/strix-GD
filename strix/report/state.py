@@ -269,6 +269,15 @@ class ReportState:
         posthog.end(self, exit_reason="finished_by_tool")
         scarf.end(self, exit_reason="finished_by_tool")
 
+    def record_qa_review(self, review: dict[str, Any]) -> None:
+        """Persist the latest QA review under ``run.json`` (``qa_review`` key)."""
+        self.run_record["qa_review"] = review
+        self.save_run_data()
+
+    def get_latest_qa_review(self) -> dict[str, Any] | None:
+        review = self.run_record.get("qa_review")
+        return review if isinstance(review, dict) else None
+
     def set_scan_config(self, config: dict[str, Any]) -> None:
         self.scan_config = config
         self.run_record["status"] = "running"

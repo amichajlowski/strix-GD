@@ -90,3 +90,19 @@ When all agents report completion:
 2. Assess overall security posture
 3. Compile executive summary with prioritized recommendations
 4. Invoke finish tool with final report
+
+### Pre-finish QA review
+
+Before `finish_scan`, call `review_before_finish` to check audit quality.
+
+- Treat returned high/critical gaps as follow-up work: spawn focused todos or
+  agents for the top gaps only (at most three workstreams per review).
+- After the follow-up completes, call `review_before_finish` again.
+- If a high/critical gap was validated by other evidence, is out of scope, or is
+  accepted as residual risk, call
+  `review_before_finish(acknowledged_gaps=["<gap_id>"])` and document it in the
+  final report. Acknowledgements are cumulative.
+- When the review reports `ready_to_finish: true`, call `finish_scan`.
+- Mention any acknowledged or deferred residual areas in the report methodology
+  or recommendations. For deep scans, `finish_scan` stays blocked until a fresh
+  review is ready.

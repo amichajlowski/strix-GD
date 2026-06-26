@@ -235,6 +235,8 @@ async def run_strix_scan(
             "agent_id": root_id,
             "parent_id": None,
             "interactive": interactive,
+            "scan_mode": scan_mode,
+            "qa_loop_enabled": scan_mode == "deep",
             "spawn_child_agent": spawn_child_agent,
         }
 

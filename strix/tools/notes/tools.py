@@ -14,8 +14,13 @@ from typing import Any
 
 from agents import RunContextWrapper, function_tool
 
+from strix.core.scrubbing import scrub_secrets
+
 
 logger = logging.getLogger(__name__)
+
+_MAX_QA_TAG_LEN = 60
+_MAX_QA_NOTES = 100
 
 
 _notes_storage: dict[str, dict[str, Any]] = {}
@@ -275,6 +280,32 @@ def _delete_note_impl(note_id: str) -> dict[str, Any]:
                 "message": f"Note '{note_title}' deleted successfully",
                 "total_count": len(_notes_storage),
             }
+
+
+def qa_notes_summary(limit: int = _MAX_QA_NOTES) -> dict[str, Any]:
+    """Compact note view for the QA review.
+
+    Returns persisted ``refs`` (note id, category, scrubbed/bounded tags only —
+    no titles, no content, no previews) and in-memory ``signals`` (lowercased
+    title/content/tags) that rule evaluation may inspect but which must never be
+    persisted verbatim.
+    """
+    refs: list[dict[str, Any]] = []
+    signals: list[str] = []
+    with _notes_lock:
+        for note_id, note in list(_notes_storage.items())[: max(0, limit)]:
+            tags = [scrub_secrets(str(t))[:_MAX_QA_TAG_LEN] for t in note.get("tags", []) or []]
+            refs.append(
+                {
+                    "note_id": note_id,
+                    "category": note.get("category", "general"),
+                    "tags": tags,
+                }
+            )
+            signals.append(str(note.get("title", "")).lower())
+            signals.append(str(note.get("content", "")).lower())
+            signals.extend(str(t).lower() for t in note.get("tags", []) or [])
+    return {"refs": refs, "signals": [s for s in signals if s]}
 
 
 @function_tool(timeout=30)

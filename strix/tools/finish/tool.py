@@ -80,6 +80,55 @@ def _do_finish(
         }
 
 
+def _qa_review_blocker(inner: dict[str, Any]) -> dict[str, Any] | None:
+    """Block deep-scan completion until a fresh, ready QA review exists.
+
+    Uses only the cheap shared metrics helper — never recomputes tool history.
+    Degraded persistence (no global report state) does not block on QA alone.
+    """
+    if not inner.get("qa_loop_enabled"):
+        return None
+
+    from strix.report.state import get_global_report_state
+
+    report_state = get_global_report_state()
+    if report_state is None:
+        return None
+
+    review = report_state.get_latest_qa_review()
+    if review is None:
+        return {
+            "success": False,
+            "scan_completed": False,
+            "error": "QA review required before finishing a deep scan",
+            "required_tool": "review_before_finish",
+        }
+
+    from strix.tools.qa_loop.tool import compute_review_metrics, metrics_match
+
+    coordinator = coordinator_from_context(inner)
+    current = compute_review_metrics(report_state, coordinator)
+    if not metrics_match(review.get("review_metrics"), current):
+        return {
+            "success": False,
+            "scan_completed": False,
+            "error": "QA review is stale; run review_before_finish again",
+            "required_tool": "review_before_finish",
+        }
+
+    if not review.get("ready_to_finish"):
+        return {
+            "success": False,
+            "scan_completed": False,
+            "error": "Cannot finish scan while QA review has high-priority gaps",
+            "qa_review": {
+                "review_id": review.get("review_id"),
+                "priority_gaps": review.get("priority_gaps", []),
+            },
+        }
+    return None
+
+
 async def _completion_blockers(inner: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     coordinator = coordinator_from_context(inner)
     me = inner.get("agent_id")
@@ -192,6 +241,10 @@ async def finish_scan(
             ensure_ascii=False,
             default=str,
         )
+
+    qa_blocker = _qa_review_blocker(inner)
+    if qa_blocker is not None:
+        return json.dumps(qa_blocker, ensure_ascii=False, default=str)
 
     result = await asyncio.to_thread(
         _do_finish,
