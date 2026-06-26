@@ -328,6 +328,21 @@ def test_priority_gaps_are_capped() -> None:
     assert full["priority_gaps_truncated"] == 0
 
 
+def test_summary_not_misleading_when_all_priority_gaps_truncated() -> None:
+    # max_priority_gaps=0 empties priority_gaps, but ready_to_finish is computed
+    # on the full blocking set, so the summary must not claim "ready to finish".
+    gaps = evaluate_qa_gaps(
+        _ctx(target_types={"web_application"}, tool_history=[_th(command="curl")])
+    )
+    assembled = assemble_review(gaps, acknowledged_gaps=[], max_priority_gaps=0)
+    assert assembled["ready_to_finish"] is False
+    assert assembled["priority_gaps"] == []
+    assert assembled["priority_gaps_truncated"] >= 1
+    summary = qa_tool._summary_text(assembled)
+    assert "ready to finish" not in summary.lower()
+    assert "high-priority gap" in summary.lower()
+
+
 def test_acknowledged_high_gap_allows_ready_and_lands_in_residual() -> None:
     gaps = evaluate_qa_gaps(
         _ctx(

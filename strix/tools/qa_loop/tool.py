@@ -21,7 +21,7 @@ from strix.core.tool_history import summarise_agent_tool_history
 from strix.report.state import get_global_report_state
 from strix.tools.notes.tools import qa_notes_summary
 from strix.tools.proxy import caido_api
-from strix.tools.qa_loop.rules import assemble_review, evaluate_qa_gaps
+from strix.tools.qa_loop.rules import as_dict, as_list, assemble_review, evaluate_qa_gaps
 from strix.tools.todo.tools import unresolved_todos_summary
 
 
@@ -90,8 +90,8 @@ async def _collect_proxy(inner: dict[str, Any]) -> tuple[list[str], bool]:
         return [], False
     paths = [
         str(path)
-        for entry in result.get("entries") or []
-        if (path := (entry.get("request") or {}).get("path"))
+        for entry in as_list(result.get("entries"))
+        if (path := as_dict(entry.get("request")).get("path"))
     ]
     return paths, True
 
@@ -103,12 +103,12 @@ def _build_review_context(
     proxy_ok: bool,
 ) -> dict[str, Any]:
     scan_config = report_state.scan_config or {}
-    targets = scan_config.get("targets") or []
-    target_types = {t.get("type") for t in targets if isinstance(t, dict)}
+    targets = as_list(scan_config.get("targets"))
+    target_types = {as_dict(t).get("type") for t in targets if isinstance(t, dict)}
 
     n_sess = int(tool_history.get("agents_with_sessions") or 0)
-    errs = tool_history.get("extraction_errors") or []
-    hist = tool_history.get("tool_history") or []
+    errs = as_list(tool_history.get("extraction_errors"))
+    hist = as_list(tool_history.get("tool_history"))
     all_failed = n_sess > 0 and not hist and bool(errs)
     available = n_sess > 0 and not all_failed
     partial = available and bool(errs)
@@ -139,16 +139,23 @@ def _scrub_gap(gap: dict[str, Any]) -> dict[str, Any]:
         if key in out:
             out[key] = _scrub_text(out[key])
     if "evidence" in out:
-        out["evidence"] = [_scrub_text(e) for e in out.get("evidence") or []]
+        out["evidence"] = [_scrub_text(e) for e in as_list(out.get("evidence"))]
     return out
 
 
 def _summary_text(assembled: dict[str, Any]) -> str:
-    gaps = assembled["priority_gaps"]
-    if not gaps:
-        return "No high-priority gaps found; audit quality review is ready to finish."
-    areas = ", ".join(str(g.get("area", "")) for g in gaps)
-    return f"Review found {len(gaps)} high-priority gap(s): {areas}."
+    # Drive readiness off ``ready_to_finish`` (computed on the full blocking set
+    # before the cap), never off the capped ``priority_gaps`` — otherwise
+    # ``max_priority_gaps=0`` would claim "ready" while the gate still blocks.
+    if assembled["ready_to_finish"]:
+        return "No unacknowledged high-priority gaps; audit quality review is ready to finish."
+    shown = assembled["priority_gaps"]
+    blocking = len(shown) + assembled.get("priority_gaps_truncated", 0)
+    if not shown:
+        return f"Review found {blocking} high-priority gap(s) to address before finishing."
+    areas = ", ".join(str(g.get("area", "")) for g in shown)
+    suffix = f" (showing {len(shown)} of {blocking})" if blocking > len(shown) else ""
+    return f"Review found {blocking} high-priority gap(s){suffix}: {areas}."
 
 
 async def _run_review(
@@ -163,6 +170,7 @@ async def _run_review(
         return {"success": False, "error": "Report state unavailable; cannot run QA review"}
 
     coordinator = coordinator_from_context(inner)
+    tool_history: dict[str, Any]
     if coordinator is not None:
         tool_history = await summarise_agent_tool_history(coordinator)
     else:
@@ -180,7 +188,7 @@ async def _run_review(
     gaps = evaluate_qa_gaps(review_context)
 
     prev = report_state.get_latest_qa_review() or {}
-    prev_ack = prev.get("acknowledged_gaps") or []
+    prev_ack = as_list(prev.get("acknowledged_gaps"))
     ack_union = sorted(set(prev_ack) | set(acknowledged_gaps or []))
 
     assembled = assemble_review(
@@ -219,7 +227,7 @@ async def _run_review(
 
 @function_tool(timeout=120)
 async def review_before_finish(
-    ctx: RunContextWrapper,
+    ctx: RunContextWrapper[Any],
     reason: str = "pre-finish audit quality review",
     max_priority_gaps: int = 5,
     acknowledged_gaps: list[str] | None = None,
@@ -247,7 +255,7 @@ async def review_before_finish(
         acknowledged_gaps: ``gap_id`` values to accept as residual/out-of-scope;
             they move to ``deferred_or_residual`` and stop blocking completion.
     """
-    inner = ctx.context if isinstance(ctx.context, dict) else {}
+    inner = as_dict(ctx.context)
     if inner.get("parent_id") is not None:
         return json.dumps(
             {

@@ -8,7 +8,17 @@ review calls.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
+
+
+def as_list(value: Any) -> list[Any]:
+    """Coerce an untyped value to a list — empty when it is not one."""
+    return cast("list[Any]", value) if isinstance(value, list) else []  # type: ignore[redundant-cast]
+
+
+def as_dict(value: Any) -> dict[str, Any]:
+    """Coerce an untyped value to a dict — empty when it is not one."""
+    return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
 
 
 _PRIORITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
@@ -48,7 +58,7 @@ def _combined(entry: dict[str, Any]) -> str:
     parts = [
         str(entry.get("tool_name") or ""),
         str(entry.get("command") or ""),
-        " ".join(str(o) for o in entry.get("key_options") or []),
+        " ".join(str(o) for o in as_list(entry.get("key_options"))),
     ]
     return " ".join(parts).lower()
 
@@ -90,7 +100,7 @@ def _flag_present(tool_history: list[dict[str, Any]], command: str, flags: set[s
     for entry in tool_history:
         if str(entry.get("command") or "").lower() != command:
             continue
-        opts = {str(o).lower() for o in entry.get("key_options") or []}
+        opts = {str(o).lower() for o in as_list(entry.get("key_options"))}
         if opts & lowered:
             return True
     return False
