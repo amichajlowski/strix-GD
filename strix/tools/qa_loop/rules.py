@@ -378,8 +378,9 @@ def assemble_review(
 
     Acknowledged ids and all medium/low gaps land in ``deferred_or_residual``;
     only unacknowledged high/critical gaps block and populate ``priority_gaps``
-    (capped at ``max_priority_gaps``). ``ready_to_finish`` is true when no
-    unacknowledged blocking gap remains.
+    (capped at ``max_priority_gaps``; ``priority_gaps_truncated`` reports how
+    many blocking gaps were omitted by the cap). ``ready_to_finish`` is true
+    when no unacknowledged blocking gap remains (computed before the cap).
     """
     ack = set(acknowledged_gaps)
     priority: list[dict[str, Any]] = []
@@ -398,9 +399,11 @@ def assemble_review(
                              "priority": gap.get("priority")})
 
     ready = len(priority) == 0
+    capped = max(0, max_priority_gaps)
     return {
         "ready_to_finish": ready,
-        "priority_gaps": priority[: max(0, max_priority_gaps)],
+        "priority_gaps": priority[:capped],
+        "priority_gaps_truncated": max(0, len(priority) - capped),
         "deferred_or_residual": residual,
         "acknowledged_gaps": sorted(ack),
     }

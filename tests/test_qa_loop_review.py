@@ -321,6 +321,11 @@ def test_priority_gaps_are_capped() -> None:
     )
     assembled = assemble_review(gaps, acknowledged_gaps=[], max_priority_gaps=5)
     assert len(assembled["priority_gaps"]) == 5
+    # Overflow blocking gaps are not silently dropped — the omitted count is surfaced.
+    full = assemble_review(gaps, acknowledged_gaps=[], max_priority_gaps=100)
+    assert assembled["priority_gaps_truncated"] == len(full["priority_gaps"]) - 5
+    assert assembled["priority_gaps_truncated"] >= 1
+    assert full["priority_gaps_truncated"] == 0
 
 
 def test_acknowledged_high_gap_allows_ready_and_lands_in_residual() -> None:
@@ -476,6 +481,42 @@ async def test_review_continues_when_proxy_unavailable(tmp_path: Path) -> None:
     out = await _run_tool(None)
     assert out["success"] is True
     assert any("proxy" in w.lower() for w in out["diagnostics"]["warnings"])
+
+
+async def test_collect_proxy_extracts_paths_and_satisfies_web_recon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_sitemap(_client: Any) -> dict[str, Any]:
+        return {
+            "entries": [
+                {"request": {"path": "/admin"}},
+                {"request": {"path": "/users"}},
+                {"label": "no-request"},  # missing request -> skipped
+                {"request": {"method": "GET"}},  # missing path -> skipped
+            ]
+        }
+
+    monkeypatch.setattr(qa_tool.caido_api, "list_sitemap_with_client", fake_sitemap)
+    paths, ok = await qa_tool._collect_proxy({"caido_client": object()})
+    assert ok is True
+    assert paths == ["/admin", "/users"]
+
+    # Available tool history with no web-recon tool: recon_web fires without proxy,
+    # but proxy paths supply the missing path-discovery signal and suppress it.
+    rs = _setup_report_state(tmp_path, [{"type": "web_application"}])
+    avail = {
+        "tool_history": [{"command": "curl"}],
+        "agents_with_sessions": 1,
+        "agents_total": 1,
+        "extraction_errors": [],
+    }
+    no_proxy = qa_tool._build_review_context(rs, avail, [], proxy_ok=False)
+    assert "recon_web:web_path_discovery" in _ids(evaluate_qa_gaps(no_proxy))
+
+    with_proxy = qa_tool._build_review_context(rs, avail, paths, ok)
+    assert with_proxy["proxy_sitemap_available"] is True
+    assert "/admin" in with_proxy["signal_text"]
+    assert "recon_web:web_path_discovery" not in _ids(evaluate_qa_gaps(with_proxy))
 
 
 # --------------------------------------------------------------------------- #

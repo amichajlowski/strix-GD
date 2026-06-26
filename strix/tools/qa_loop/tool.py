@@ -20,6 +20,7 @@ from strix.core.scrubbing import scrub_secrets
 from strix.core.tool_history import summarise_agent_tool_history
 from strix.report.state import get_global_report_state
 from strix.tools.notes.tools import qa_notes_summary
+from strix.tools.proxy import caido_api
 from strix.tools.qa_loop.rules import assemble_review, evaluate_qa_gaps
 from strix.tools.todo.tools import unresolved_todos_summary
 
@@ -72,14 +73,27 @@ async def _collect_proxy(inner: dict[str, Any]) -> tuple[list[str], bool]:
     """Best-effort proxy path samples (path only, query stripped).
 
     Returns ``(paths, ok)``. ``ok=False`` means the optional source was
-    unavailable and the caller should record a diagnostic, not crash.
+    unavailable — not configured, or the sitemap fetch failed — and the caller
+    records a diagnostic rather than crashing. ``ok=True`` with no paths means
+    the proxy is reachable but captured nothing yet.
 
-    ponytail: no live Caido sitemap fetch in the MVP — overridden in tests and
-    extendable later. Optional source per spec; failure must never crash audit.
+    ponytail: root sitemap level only (no recursive descent) — enough to signal
+    that path discovery happened; deepen if coverage rules need more.
     """
-    if inner.get("caido_client") is None:
+    client = inner.get("caido_client")
+    if client is None:
         return [], False
-    return [], False
+    try:
+        result = await caido_api.list_sitemap_with_client(client)
+    except Exception:  # noqa: BLE001 - degraded source must not crash the audit
+        logger.debug("QA review: Caido sitemap fetch failed", exc_info=True)
+        return [], False
+    paths = [
+        str(path)
+        for entry in result.get("entries") or []
+        if (path := (entry.get("request") or {}).get("path"))
+    ]
+    return paths, True
 
 
 def _build_review_context(
@@ -193,6 +207,7 @@ async def _run_review(
         "summary": _scrub_text(_summary_text(assembled)),
         "acknowledged_gaps": assembled["acknowledged_gaps"],
         "priority_gaps": [_scrub_gap(g) for g in assembled["priority_gaps"]],
+        "priority_gaps_truncated": assembled["priority_gaps_truncated"],
         "deferred_or_residual": [_scrub_gap(g) for g in assembled["deferred_or_residual"]],
         "review_metrics": metrics,
         "diagnostics": diagnostics,

@@ -93,6 +93,10 @@ def _qa_review_blocker(inner: dict[str, Any]) -> dict[str, Any] | None:
 
     report_state = get_global_report_state()
     if report_state is None:
+        logger.warning(
+            "Deep-scan finish proceeding without QA review: global report state "
+            "unavailable (degraded persistence), so the QA gate cannot be enforced."
+        )
         return None
 
     review = report_state.get_latest_qa_review()

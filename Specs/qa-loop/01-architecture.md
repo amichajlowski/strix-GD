@@ -115,6 +115,7 @@ The JSON output should be stable and compact:
   "reason": "pre-finish audit quality review",
   "summary": "Review found high-priority gaps in JWT validation and dependency CVE coverage.",
   "acknowledged_gaps": [],
+  "priority_gaps_truncated": 0,
   "priority_gaps": [
     {
       "gap_id": "auth_jwt:jwt_authentication",
@@ -147,24 +148,32 @@ The JSON output should be stable and compact:
 ```
 
 `priority_gaps` should contain only actionable high-value gaps. Cap it with `max_priority_gaps`
-after sorting by priority and confidence.
+after sorting by priority and confidence. `ready_to_finish` is computed on the full blocking set
+before the cap, and `priority_gaps_truncated` reports how many blocking gaps the cap omitted so
+the count is never silently dropped (omitted gaps resurface on the next review).
 
 ## Persistence
 
-Persist the latest review result under `run.json`:
+Persist the latest review result under `run.json`. The persisted payload is the same object the
+tool returns, including `success`, `reason`, `priority_gaps_truncated`, and `note_refs` (scrubbed
+note id/category/tags — the mechanism that satisfies "persist note refs, never note bodies"):
 
 ```json
 {
   "qa_review": {
+    "success": true,
     "review_id": "qa_20260625_120000_ab12",
     "created_at": "2026-06-25T12:00:00Z",
     "ready_to_finish": false,
+    "reason": "pre-finish audit quality review",
     "summary": "...",
     "acknowledged_gaps": [],
+    "priority_gaps_truncated": 0,
     "priority_gaps": [],
     "deferred_or_residual": [],
     "review_metrics": {},
-    "diagnostics": {}
+    "diagnostics": {},
+    "note_refs": []
   }
 }
 ```
