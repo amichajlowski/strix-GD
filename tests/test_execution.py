@@ -46,14 +46,17 @@ async def test_wait_for_message_returns_immediately_after_budget_stop() -> None:
 
 
 class _FakeSession:
-    def __init__(self) -> None:
-        self.items: list[Any] = []
+    def __init__(self, items: list[Any] | None = None) -> None:
+        self.items: list[Any] = list(items or [])
 
     async def add_items(self, items: list[Any]) -> None:
         self.items.extend(items)
 
     async def get_items(self) -> list[Any]:
         return list(self.items)
+
+    async def clear_session(self) -> None:
+        self.items = []
 
 
 @pytest.mark.asyncio
@@ -281,3 +284,77 @@ async def test_budget_stop_does_not_emit_child_error_notification(
     # Budget stop is a clean scan-wide shutdown, not a child failure.
     assert coordinator.pending_counts.get("root", 0) == 0
     assert coordinator.runtimes["root"].session.items == []
+
+
+@pytest.mark.asyncio
+async def test_repair_malformed_tool_calls_neutralises_bad_arguments() -> None:
+    from strix.core.sessions import repair_malformed_tool_calls_in_session
+
+    session = _FakeSession(
+        [
+            {"type": "message", "role": "assistant", "content": "planning"},
+            {"type": "function_call", "call_id": "c1", "name": "create_agent",
+             "arguments": '{"task": "do x"'},  # malformed: missing closing brace
+            {"type": "function_call", "call_id": "c2", "name": "noop",
+             "arguments": '{"ok": true}'},  # valid
+        ]
+    )
+
+    repaired = await repair_malformed_tool_calls_in_session(session)  # type: ignore[arg-type]
+
+    assert repaired is True
+    assert session.items[1]["arguments"] == "{}"  # neutralised
+    assert session.items[2]["arguments"] == '{"ok": true}'  # valid one untouched
+    assert session.items[0]["content"] == "planning"  # non-tool item untouched
+    # Idempotent: a clean session repairs nothing.
+    assert await repair_malformed_tool_calls_in_session(session) is False  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_repairs_poisoned_history_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A 400 whose cause is a malformed tool call already in history must trigger
+    # a session repair + retry, not immediately kill the agent.
+    from strix.core import execution
+
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+    session = _FakeSession(
+        [
+            {"type": "function_call", "call_id": "c1", "name": "create_agent",
+             "arguments": '{"task": "do x"'},  # the poison
+        ]
+    )
+
+    class _RejectedError(Exception):
+        status_code = 400
+
+    calls = {"n": 0}
+
+    def flaky(*_args: Any, **_kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _RejectedError("Expecting ',' delimiter: line 1 column 32 (char 31)")
+        raise RuntimeError("second-attempt sentinel")  # distinct: proves we retried
+
+    monkeypatch.setattr(execution.Runner, "run_streamed", flaky)
+
+    result = await execution._run_cycle(
+        object(),
+        coordinator,
+        "root",
+        input_data="task",
+        run_config=object(),
+        context={"parent_id": None},
+        max_turns=5,
+        session=session,
+        interactive=True,
+        event_sink=None,
+        hooks=None,
+    )
+
+    assert result is None
+    assert calls["n"] == 2  # retried after repairing history
+    assert session.items[0]["arguments"] == "{}"  # poison neutralised
+    assert coordinator.statuses["root"] in {"failed", "crashed"}

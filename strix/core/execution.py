@@ -17,7 +17,11 @@ from openai import APIError
 
 from strix.core.hooks import BudgetExceededError
 from strix.core.inputs import child_initial_input
-from strix.core.sessions import open_agent_session, strip_all_images_from_session
+from strix.core.sessions import (
+    open_agent_session,
+    repair_malformed_tool_calls_in_session,
+    strip_all_images_from_session,
+)
 
 
 if TYPE_CHECKING:
@@ -348,6 +352,7 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
     hooks: RunHooks[dict[str, Any]] | None,
 ) -> RunResultBase | None:
     image_strips = 0
+    tool_call_repairs = 0
     while True:
         try:
             await coordinator.mark_running(agent_id)
@@ -400,11 +405,8 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
             await coordinator.trigger_budget_stop()
             raise
         except Exception as exc:
-            if (
-                image_strips < 3
-                and session is not None
-                and getattr(exc, "status_code", None) in _INPUT_REJECTION_CODES
-            ):
+            input_rejected = getattr(exc, "status_code", None) in _INPUT_REJECTION_CODES
+            if image_strips < 3 and session is not None and input_rejected:
                 try:
                     stripped = await strip_all_images_from_session(session)
                 except Exception:
@@ -416,6 +418,28 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
                         "Stripped images from %s session after rejection; retrying (%d)",
                         agent_id,
                         image_strips,
+                    )
+                    input_data = []
+                    continue
+            # A tool call with malformed JSON arguments is stored in history and
+            # poisons every subsequent request (the endpoint 400s on the bad
+            # ``arguments`` string). Neutralise it and retry the turn rather than
+            # letting one bad model emission kill the agent (and, non-interactive,
+            # the whole scan). Narrowly scoped: only fires on an input-rejection
+            # code AND only when a malformed call actually exists in history.
+            if tool_call_repairs < 3 and session is not None and input_rejected:
+                try:
+                    repaired = await repair_malformed_tool_calls_in_session(session)
+                except Exception:
+                    logger.exception("tool-call repair recovery failed for %s", agent_id)
+                    repaired = False
+                if repaired:
+                    tool_call_repairs += 1
+                    logger.info(
+                        "Repaired malformed tool-call arguments in %s session after "
+                        "rejection; retrying (%d)",
+                        agent_id,
+                        tool_call_repairs,
                     )
                     input_data = []
                     continue
