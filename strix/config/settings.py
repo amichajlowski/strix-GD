@@ -37,6 +37,13 @@ class LlmSettings(BaseSettings):
     )
     reasoning_effort: ReasoningEffort = Field(default="high", alias="STRIX_REASONING_EFFORT")
     timeout: int = Field(default=300, alias="LLM_TIMEOUT")
+    # Cap on the tokens sent to the model per request. History that would exceed
+    # this is trimmed (oldest turns first) before the call, so an agent's growing
+    # session never trips the provider's hard context-length 400. Default 256K.
+    # Set to 0 (or less) to disable trimming entirely. When the provider rejects a
+    # request with its true limit, that limit is learned and applied automatically
+    # (see strix.core.context_limit), so a value set too high self-corrects.
+    context_window: int = Field(default=262144, alias="STRIX_LLM_CONTEXT_WINDOW")
     max_retries: int = Field(default=5, ge=0, alias="STRIX_LLM_MAX_RETRIES")
     retry_initial_delay: float = Field(
         default=2.0,

@@ -15,6 +15,7 @@ from agents.sandbox.errors import ExecTransportError
 from docker import errors as docker_errors  # type: ignore[import-untyped, unused-ignore]
 from openai import APIError
 
+from strix.core.context_limit import parse_context_length_from_error
 from strix.core.hooks import BudgetExceededError
 from strix.core.inputs import child_initial_input
 from strix.core.sessions import (
@@ -353,6 +354,7 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
 ) -> RunResultBase | None:
     image_strips = 0
     tool_call_repairs = 0
+    context_relimits = 0
     while True:
         try:
             await coordinator.mark_running(agent_id)
@@ -406,6 +408,29 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
             raise
         except Exception as exc:
             input_rejected = getattr(exc, "status_code", None) in _INPUT_REJECTION_CODES
+            # A context-length 400 carries the model's true window in its message.
+            # Teach it to the shared context-limit filter so the next request is
+            # trimmed to fit, then retry rather than killing the agent. This makes
+            # the cap self-correcting when the configured window is too high for
+            # the model actually serving the request (e.g. a smaller local model).
+            if context_relimits < 3 and input_rejected:
+                reported_max = parse_context_length_from_error(str(exc))
+                context_filter = getattr(run_config, "call_model_input_filter", None)
+                if (
+                    reported_max is not None
+                    and context_filter is not None
+                    and hasattr(context_filter, "note_context_length")
+                    and context_filter.note_context_length(reported_max)
+                ):
+                    context_relimits += 1
+                    logger.info(
+                        "Lowered context budget for %s to reported max %d; retrying (%d)",
+                        agent_id,
+                        reported_max,
+                        context_relimits,
+                    )
+                    input_data = []
+                    continue
             if image_strips < 3 and session is not None and input_rejected:
                 try:
                     stripped = await strip_all_images_from_session(session)

@@ -21,6 +21,7 @@ from strix.config.models import (
     uses_chat_completions_tool_schema,
 )
 from strix.core.agents import AgentCoordinator
+from strix.core.context_limit import ContextLimitFilter
 from strix.core.execution import (
     respawn_subagents,
     run_agent_loop,
@@ -186,12 +187,18 @@ async def run_strix_scan(
             model_name=resolved_model,
             retry_settings=model_retry_settings_from_config(settings),
         )
+        context_filter = (
+            ContextLimitFilter(settings.llm.context_window)
+            if settings.llm.context_window > 0
+            else None
+        )
         run_config = RunConfig(
             model=resolved_model,
             model_provider=StrixProvider(),
             model_settings=model_settings,
             sandbox=SandboxRunConfig(client=bundle["client"], session=bundle["session"]),
             trace_include_sensitive_data=False,
+            call_model_input_filter=context_filter,
         )
         hooks = ReportUsageHooks(model=resolved_model, max_budget_usd=max_budget_usd)
 
