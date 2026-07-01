@@ -13,9 +13,12 @@ from typing import TYPE_CHECKING, Any, Literal
 from agents import RunContextWrapper, function_tool
 
 from strix.tools.proxy import caido_api
+from strix.tools.proxy._traffic import summarize_traffic
 
 
 logger = logging.getLogger(__name__)
+
+__all__ = ["summarize_traffic", "traffic_health"]
 
 
 if TYPE_CHECKING:
@@ -594,3 +597,76 @@ async def scope_rules(
         )
     except Exception as exc:  # noqa: BLE001
         return _err("scope_rules", exc)
+
+
+def _httpql_str(value: str) -> str:
+    """Quote a string value for an HTTPQL filter, escaping embedded quotes."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+@function_tool(timeout=60)
+async def traffic_health(
+    ctx: RunContextWrapper,
+    first: int = 100,
+    host: str | None = None,
+    since: str | None = None,
+) -> str:
+    """Summarise how in-scope targets are responding to recent traffic.
+
+    Reads the last `first` proxied HTTP transactions and reports a status-code
+    histogram, block/throttle rates (403/429/503), latency percentiles, a
+    per-host breakdown, and a plain interpretation with a recommended action
+    (e.g. lower rate, switch to evasion payloads, or proceed). Use this after
+    any burst of automated requests (ffuf/sqlmap/nuclei/scripts) and before
+    scaling load up, so throttling and WAF behaviour are caught early.
+
+    Args:
+        first: Window size — number of most-recent transactions to analyse
+            (default 100, hard cap 500).
+        host: Optional host filter (exact match), e.g. "api.XXXX.example".
+        since: Optional ISO-8601 timestamp; only transactions after it count.
+    """
+    client = _ctx_client(ctx)
+    if client is None:
+        return _no_client()
+
+    first = max(1, min(first, 500))
+
+    filters: list[str] = []
+    if host:
+        filters.append(f"req.host.eq:{_httpql_str(host)}")
+    if since:
+        filters.append(f"req.created_at.gt:{_httpql_str(since)}")
+    httpql_filter = " AND ".join(filters) if filters else None
+
+    try:
+        connection = await caido_api.list_requests_with_client(
+            client,
+            first=first,
+            httpql_filter=httpql_filter,
+            sort_by="timestamp",
+            sort_order="desc",
+        )
+
+        rows: list[dict[str, Any]] = []
+        for edge in connection.edges:
+            req = edge.node.request
+            resp = edge.node.response
+            rows.append(
+                {
+                    "status": resp.status_code if resp else None,
+                    "roundtrip_ms": (
+                        resp.roundtrip_time if (resp and resp.roundtrip_time) else None
+                    ),
+                    "host": req.host,
+                    "method": req.method,
+                }
+            )
+
+        digest = summarize_traffic(rows)
+        return json.dumps(
+            {"success": True, **digest}, ensure_ascii=False, default=str
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err("traffic_health", exc)

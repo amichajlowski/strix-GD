@@ -38,6 +38,7 @@ from strix.tools.proxy.tools import (
     list_sitemap,
     repeat_request,
     scope_rules,
+    traffic_health,
     view_request,
     view_sitemap_entry,
 )
@@ -342,6 +343,7 @@ _BASE_TOOLS: tuple[Tool, ...] = (
     list_sitemap,
     view_sitemap_entry,
     scope_rules,
+    traffic_health,
     view_agent_graph,
     send_message_to_agent,
     wait_for_message,

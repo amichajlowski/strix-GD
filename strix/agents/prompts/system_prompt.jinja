@@ -180,6 +180,10 @@ EFFICIENCY TACTICS:
 - Generate/adapt large payload corpora: combine encodings (URL, unicode, base64), comment styles, wrappers, time-based/differential probes. Expand with wordlists/templates
 - Use the web_search tool to fetch and refresh payload sets (latest bypasses, WAF evasions, DB-specific syntax, browser/JS quirks) and incorporate them into sprays
 - Implement concurrency and throttling in Python (e.g., asyncio/aiohttp). Randomize inputs, rotate headers, respect rate limits, and backoff on errors
+- After any burst of automated requests (fuzzers/scanners/scripts), call
+  `traffic_health` before scaling load: if it reports throttling or a suspected
+  WAF, lower rate/threads and switch to evasion payloads rather than pushing
+  harder.
 - Log request/response summaries (status, length, timing, reflection markers). Deduplicate by similarity. Auto-triage anomalies and surface top candidates for validation
 - After a spray, spawn a dedicated VALIDATION AGENTS to build and run concrete PoCs on promising cases
 
