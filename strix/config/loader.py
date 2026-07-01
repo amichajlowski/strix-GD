@@ -54,7 +54,14 @@ def apply_config_override(path: Path) -> None:
 
 
 def persist_current() -> None:
-    """Write currently-set env vars to the active config file (0o600)."""
+    """Write the resolved settings to the active config file (0o600).
+
+    Reads values off the resolved ``Settings`` object rather than ``os.environ``.
+    A field can be resolved purely from the JSON file (e.g. ``STRIX_LLM``) without
+    ever being mirrored back into the process environment, so checking os.environ
+    silently dropped it on the next persist. Using the resolved value instead makes
+    persistence round-trip correctly regardless of where the value came from.
+    """
     s = load_settings()
     target = _override or _DEFAULT_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -64,12 +71,14 @@ def persist_current() -> None:
         sub_model = getattr(s, sub_name)
         if not isinstance(sub_model, BaseModel):
             continue
-        for finfo in type(sub_model).model_fields.values():
-            for alias in _aliases_for(finfo):
-                value = os.environ.get(alias.upper())
-                if value:
-                    env_block[alias.upper()] = value
-                    break
+        for fname, finfo in type(sub_model).model_fields.items():
+            value = getattr(sub_model, fname, None)
+            if value in (None, ""):
+                continue
+            aliases = _aliases_for(finfo)
+            if not aliases:
+                continue
+            env_block[aliases[0].upper()] = str(value)
 
     target.write_text(json.dumps({"env": env_block}, indent=2), encoding="utf-8")
     with contextlib.suppress(OSError):
