@@ -435,6 +435,11 @@ Directories:
 - /home/pentester/tools/wordlists - Currently empty, but you should download wordlists here when you need.
 
 Default user: pentester (sudo available)
+
+- During recon, record what the target IS with `set_target_profile`
+  (localhost vs internet, WAF/CDN, stack, auth, asset type). Read
+  `get_target_profile` before running scanners/fuzzers and tune options to its
+  hints — never fuzz localhost slowly or spray raw payloads through a WAF.
 </environment>
 
 {% if loaded_skill_names %}

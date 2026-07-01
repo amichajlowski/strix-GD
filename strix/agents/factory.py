@@ -49,6 +49,10 @@ from strix.tools.proxy.tools import (
 )
 from strix.tools.qa_loop.tool import review_before_finish
 from strix.tools.reporting.tool import create_vulnerability_report
+from strix.tools.target_profile.tools import (
+    get_target_profile,
+    set_target_profile,
+)
 from strix.tools.thinking.tool import think
 from strix.tools.todo.tools import (
     create_todo,
@@ -352,6 +356,8 @@ _BASE_TOOLS: tuple[Tool, ...] = (
     record_loot,
     get_loot,
     delete_loot,
+    set_target_profile,
+    get_target_profile,
     view_agent_graph,
     send_message_to_agent,
     wait_for_message,

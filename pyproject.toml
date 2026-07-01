@@ -199,6 +199,7 @@ ignore = [
 # strix.telemetry / strix.report.dedupe / cvss.
 "strix/tools/notes/tools.py" = ["PLC0415", "TC002"]
 "strix/tools/loot/tools.py" = ["PLC0415", "TC002"]
+"strix/tools/target_profile/tools.py" = ["PLC0415", "TC002"]
 "strix/tools/finish/tool.py" = ["PLC0415", "TC002"]
 "strix/tools/reporting/tool.py" = ["PLC0415", "TC002"]
 "strix/tools/**/*.py" = [

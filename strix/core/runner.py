@@ -107,11 +107,13 @@ async def run_strix_scan(
 
     from strix.tools.loot.tools import hydrate_loot_from_disk
     from strix.tools.notes.tools import hydrate_notes_from_disk
+    from strix.tools.target_profile.tools import hydrate_target_profiles_from_disk
     from strix.tools.todo.tools import hydrate_todos_from_disk
 
     hydrate_todos_from_disk(state_dir)
     hydrate_notes_from_disk(state_dir)
     hydrate_loot_from_disk(state_dir)
+    hydrate_target_profiles_from_disk(state_dir)
 
     # Resolve scan inputs before sandbox startup so the root checkpoint can be
     # written even if the sandbox never comes up.
