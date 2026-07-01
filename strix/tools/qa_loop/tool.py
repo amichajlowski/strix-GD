@@ -19,6 +19,7 @@ from strix.core.agents import coordinator_from_context
 from strix.core.scrubbing import scrub_secrets
 from strix.core.tool_history import summarise_agent_tool_history
 from strix.report.state import get_global_report_state
+from strix.tools.loot.tools import qa_loot_summary
 from strix.tools.notes.tools import qa_notes_summary
 from strix.tools.proxy import caido_api
 from strix.tools.qa_loop.rules import as_dict, as_list, assemble_review, evaluate_qa_gaps
@@ -114,7 +115,9 @@ def _build_review_context(
     partial = available and bool(errs)
 
     notes = qa_notes_summary()
+    loot = qa_loot_summary()
     signal_text: list[str] = list(notes["signals"])
+    signal_text.extend(loot["signals"])
     signal_text.extend(str(v.get("title", "")).lower() for v in report_state.vulnerability_reports)
     signal_text.extend(p.lower() for p in proxy_paths)
 
@@ -126,6 +129,7 @@ def _build_review_context(
         "proxy_sitemap_available": proxy_ok and bool(proxy_paths),
         "signal_text": signal_text,
         "_note_refs": notes["refs"],
+        "_loot_refs": loot["refs"],
     }
 
 
@@ -220,6 +224,7 @@ async def _run_review(
         "review_metrics": metrics,
         "diagnostics": diagnostics,
         "note_refs": review_context["_note_refs"],
+        "loot_refs": review_context["_loot_refs"],
     }
     report_state.record_qa_review(review)
     return review

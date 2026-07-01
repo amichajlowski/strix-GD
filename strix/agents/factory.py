@@ -26,6 +26,11 @@ from strix.tools.agents_graph.tools import (
 )
 from strix.tools.finish.tool import finish_scan
 from strix.tools.load_skill.tool import load_skill
+from strix.tools.loot.tools import (
+    delete_loot,
+    get_loot,
+    record_loot,
+)
 from strix.tools.notes.tools import (
     create_note,
     delete_note,
@@ -344,6 +349,9 @@ _BASE_TOOLS: tuple[Tool, ...] = (
     view_sitemap_entry,
     scope_rules,
     traffic_health,
+    record_loot,
+    get_loot,
+    delete_loot,
     view_agent_graph,
     send_message_to_agent,
     wait_for_message,
