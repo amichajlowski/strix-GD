@@ -253,6 +253,37 @@ async def _spawn_guard_response(
     return None
 
 
+async def _wait_guard_response(
+    *,
+    coordinator: AgentCoordinator,
+    agent_id: str,
+    parent_id: str | None,
+    reason: str,
+) -> dict[str, Any] | None:
+    """Refuse to park a subagent that has no active children.
+
+    A subagent whose children are all terminal (or that never spawned any)
+    has nothing left that will message it back, so parking stalls it
+    forever on the interactive immediate-return path (no timeout). Nudge it
+    to ``agent_finish`` instead. Root agents (``parent_id is None``) are
+    exempt: in interactive mode they park to await user steering by design.
+    """
+    if parent_id is None:
+        return None
+    if await coordinator.active_child_count(agent_id) > 0:
+        return None
+    return {
+        "success": True,
+        "wait_outcome": "no_active_children",
+        "reason": reason,
+        "note": (
+            "No active child agents to wait for — parking now would stall. Call "
+            "agent_finish to report your results to the parent, or keep working "
+            "if your task isn't done."
+        ),
+    }
+
+
 @function_tool(timeout=601)
 async def wait_for_message(  # noqa: PLR0911
     ctx: RunContextWrapper,
@@ -271,6 +302,9 @@ async def wait_for_message(  # noqa: PLR0911
     - **Never** call this if you finished your own task and have **no**
       child agents running — that's a permanent stall. Call
       ``finish_scan`` (root) or ``agent_finish`` (subagent) instead.
+      Subagents with no active children are guarded: this returns a nudge
+      instead of parking. Root has no such guard (it may park to await the
+      user), so a root with nothing left to do must call ``finish_scan``.
     - If you're waiting on an agent that **isn't your child**, message
       it first asking it to ping you when done — otherwise it has no
       reason to send to your inbox and you'll wait the full timeout.
@@ -324,6 +358,15 @@ async def wait_for_message(  # noqa: PLR0911
             ensure_ascii=False,
             default=str,
         )
+
+    wait_guard = await _wait_guard_response(
+        coordinator=coordinator,
+        agent_id=me,
+        parent_id=inner.get("parent_id"),
+        reason=reason,
+    )
+    if wait_guard is not None:
+        return json.dumps(wait_guard, ensure_ascii=False, default=str)
 
     if interactive:
         await coordinator.park_waiting(me)

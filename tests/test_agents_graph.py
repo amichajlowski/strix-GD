@@ -12,6 +12,7 @@ from strix.core.execution import _notify_parent_on_terminal_error
 from strix.tools.agents_graph.tools import (
     _MAX_ACTIVE_CHILDREN_PER_PARENT,
     _spawn_guard_response,
+    _wait_guard_response,
 )
 
 
@@ -67,6 +68,70 @@ async def test_noninteractive_parent_wait_unblocks_on_child_failure_message() ->
     await _notify_parent_on_terminal_error(coordinator, "child", "failed")
 
     await asyncio.wait_for(waiter, timeout=1.0)
+
+
+async def test_wait_guard_nudges_subagent_with_no_children() -> None:
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+    await coordinator.register("leaf", "jwt-fixer", parent_id="root")
+
+    response = await _wait_guard_response(
+        coordinator=coordinator,
+        agent_id="leaf",
+        parent_id="root",
+        reason="done",
+    )
+
+    assert response is not None
+    assert response["wait_outcome"] == "no_active_children"
+
+
+async def test_wait_guard_nudges_subagent_with_all_children_terminal() -> None:
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+    await coordinator.register("orch", "auth-bypass", parent_id="root")
+    await coordinator.register("grandchild", "jwt-fixer", parent_id="orch")
+    await coordinator.set_status("grandchild", "completed")
+
+    response = await _wait_guard_response(
+        coordinator=coordinator,
+        agent_id="orch",
+        parent_id="root",
+        reason="done",
+    )
+
+    assert response is not None
+    assert response["wait_outcome"] == "no_active_children"
+
+
+async def test_wait_guard_parks_subagent_with_active_child() -> None:
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+    await coordinator.register("orch", "auth-bypass", parent_id="root")
+    await coordinator.register("grandchild", "jwt-fixer", parent_id="orch")  # still running
+
+    response = await _wait_guard_response(
+        coordinator=coordinator,
+        agent_id="orch",
+        parent_id="root",
+        reason="waiting on child",
+    )
+
+    assert response is None
+
+
+async def test_wait_guard_exempts_root() -> None:
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+
+    response = await _wait_guard_response(
+        coordinator=coordinator,
+        agent_id="root",
+        parent_id=None,
+        reason="await user",
+    )
+
+    assert response is None
 
 
 async def test_spawn_guard_blocks_repeated_terminal_errors() -> None:
