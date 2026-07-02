@@ -40,11 +40,19 @@ async def run_reflection(*, model: str, caido_client: Any | None) -> dict[str, A
     (see below). Never raises into the caller."""
 ```
 
-The reflection **reads the persisted blackboard directly** (the module dicts of
-`loot` / `target_profile` / `audit_state` / `notes`, plus
-`evaluate_qa_gaps(...)` output) — no tool calls. A traffic digest is included
-**only if** a Caido client is available from the triggering context; otherwise it
-is omitted (the reflection must work without Caido).
+The reflection reads the persisted blackboard **through the existing
+lock-protected accessors** (`qa_loot_summary`-style summaries / the store
+`_get_*_impl` / a snapshot taken under each store's lock) — **not** by
+raw-iterating the module dicts, which would hit `RuntimeError: dict changed size
+during iteration` when an agent writes concurrently. It also reads
+`evaluate_qa_gaps(...)`. No tool calls. A traffic digest is included **only if** a
+Caido client is available from the triggering context; otherwise omitted (the
+reflection must work without Caido).
+
+`apply_reflection` writes `audit_state` via the Feature-1 pure helpers **while
+holding `_audit_state_lock`** (the pure helpers don't lock; the lock lives in the
+tool `_impl`). This serialises it against the root's `update_audit_state` tool
+calls and its own `_persist`.
 
 ## Deterministic trigger — `on_agent_end` (reuse the existing hooks)
 
@@ -55,15 +63,26 @@ with it) that fires the reflection when a **specialist child** finishes:
 
 ```python
 async def on_agent_end(self, context, agent, output) -> None:
-    ctx = context.context if isinstance(context.context, dict) else {}
-    if ctx.get("agent_id") is None or ctx.get("parent_id") is None:
-        return                      # root ending = scan over; don't reflect
-    coordinator = ctx.get("coordinator")
-    if coordinator is not None and getattr(coordinator, "budget_stopped", False):
-        return                      # respect the budget stop
-    model = <resolved STRIX_LLM model>
-    await _schedule_reflection(model=model, caido_client=ctx.get("caido_client"))
+    try:                            # MUST never raise into the caller (teardown path)
+        ctx = context.context if isinstance(context.context, dict) else {}
+        if ctx.get("agent_id") is None or ctx.get("parent_id") is None:
+            return                  # root ending = scan over; don't reflect
+        coordinator = ctx.get("coordinator")
+        if coordinator is not None and (
+            getattr(coordinator, "budget_stopped", False)
+            or getattr(coordinator, "is_shutting_down", False)
+        ):
+            return                  # respect budget stop / shutdown
+        model = <resolved via StrixProvider mapping — NOT raw STRIX_LLM>
+        _schedule_reflection(model=model, caido_client=ctx.get("caido_client"))
+    except Exception:               # noqa: BLE001 — a reflection bug must not crash an agent
+        logger.exception("on_agent_end reflection scheduling failed")
 ```
+
+`_schedule_reflection` starts the reflection as a background task
+(`asyncio.create_task`) with a done-callback that logs any exception (so it is
+never an unretrieved-task error and never propagates). Single-flight: if one is
+running, set `dirty` and return; re-run once on completion if `dirty`.
 
 - **Filter:** only child agents (`parent_id is not None`) trigger it — the root
   ending means the scan is over. There is **no strategist agent** to exclude
@@ -108,14 +127,27 @@ must:
 3. on parse failure, **retry once**; on a second failure, log and **skip this
    reflection** (leave `audit_state` unchanged) — never crash the run.
 
+## Model resolution (must reuse the run's mapping)
+
+`STRIX_LLM` is a display form (`ollama/llama3`, `deepseek/deepseek-chat`, …); the
+run routes it through `StrixProvider` (`config/models.py` ~30–44) which maps
+`ollama/X` → `ollama_chat/X` and passes other prefixes through to litellm.
+`run_reflection` **must apply the same mapping** (call the shared resolver, or get
+the SDK `Model` from `run_config.model_provider` and call it) — passing raw
+`STRIX_LLM` to `litellm.acompletion` mis-routes ollama (the likely local setup)
+and the reflection would silently always fail. Pass the run's temperature too.
+
 ## Budget accounting (do not make reflection invisible)
 
 The direct litellm call spends tokens outside the SDK usage hook, so it must be
 recorded or it escapes `--max-budget-usd`:
 - skip entirely if `coordinator.budget_stopped`;
-- after the call, record usage into `report_state` (mirror
-  `ReportUsageHooks.on_llm_end`'s `record_sdk_usage`) using litellm's returned
-  usage. Reflection tokens then count against the budget like everything else.
+- after the call, compute cost with `litellm.completion_cost(response)` and call
+  `report_state.record_observed_llm_cost(cost)` — **not** `record_sdk_usage`
+  (which needs an SDK `Usage` object a litellm response doesn't provide).
+  `record_observed_llm_cost` feeds `_total_cost` → `get_total_llm_cost()` → the
+  `on_llm_end` budget check, so reflection spend still enforces the budget (caught
+  on the next model turn). Verified against `report/usage.py`.
 
 ## QA-gate integration (the enforcement)
 
@@ -181,11 +213,17 @@ local model. Also phase-2: event triggers beyond child-completion (e.g. a
 - `run_reflection` skips cleanly (no change, no raise) on a parse failure after
   one retry, and when `budget_stopped` is set (both covered with a mocked
   litellm — no live model).
+- `run_reflection` reads via the lock-protected accessors (does not raw-iterate
+  the store dicts) and applies under `_audit_state_lock`.
 - The `on_agent_end` trigger fires the reflection for a **child** end and **not**
   for a root end; single-flight coalescing runs at most one extra reflection for
-  a burst (covered with a fake coordinator/hook, no live model).
-- Reflection usage is recorded to `report_state` (covered by asserting
-  `record_sdk_usage` is called with the mocked litellm usage).
+  a burst; **the hook never raises** even if the scheduled reflection blows up
+  (covered with a fake coordinator/hook, no live model).
+- Reflection cost is recorded via `record_observed_llm_cost` and reaches
+  `get_total_llm_cost()` (covered with a mocked `litellm.completion_cost`).
+- **Regression guard:** `_build_review_context` + `evaluate_qa_gaps` run cleanly
+  and block nothing when `audit_state` is **empty** (feature unused) — the
+  unguarded finish path must not break for non-adaptive scans.
 - `evaluate_qa_gaps` emits a finish-blocking gap for an open **high** lead; none
   for `done`/`dropped`/`medium`/`low`; the gap `reason` is `_scrub_gap`-scrubbed;
   an acknowledged lead-gap no longer blocks. All offline.

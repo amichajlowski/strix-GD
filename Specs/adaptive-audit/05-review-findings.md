@@ -37,6 +37,26 @@ agent would have been manual-smoke-only). It is more code than reusing
 `strix/config/models.py`, model id from `STRIX_LLM`; `on_agent_end` exists on
 `RunHooks`.
 
+## 0.2 Integration / regression review — will it break the current audit?
+
+A pass focused on how the design touches the **live** run loop, to catch
+regressions to the existing audit. Verified against the tree; all fixed in-spec.
+
+| # | Sev | Regression / misalignment | Fix applied |
+|---|-----|---------------------------|-------------|
+| R1 | High | `review_before_finish → _run_review → _build_review_context` runs on **every deep-scan finish** and is **not** wrapped in try/except (confirmed). A throw in the new `qa_audit_summary()` or lead-gap rule would break the finish gate for *all* deep scans, feature-used or not. | Hard requirement + test: `qa_audit_summary` and the lead rule must be null-safe / never raise on empty/missing `audit_state`; regression test runs the full path on an **empty** store (01 §4, 03 acceptance, 04 test 22). |
+| R2 | High | The run resolves models via `StrixProvider` (`ollama/X → ollama_chat/X`); the spec's raw `litellm.acompletion(model=STRIX_LLM)` would **mis-route ollama** (the likely local setup) → reflection silently always fails → feature dead. | Reuse the `StrixProvider` mapping (or the SDK `Model` from `run_config.model_provider`); never hand raw `STRIX_LLM` to litellm (01 §3, 03 "Model resolution"). |
+| R3 | Med | Reflection raw-iterating the store module-dicts while agents write → `RuntimeError: dict changed size during iteration`. | Read via the lock-protected accessors / snapshot under each store lock (01 §3, 03; test 19a). |
+| R4 | Med | `record_sdk_usage` needs an SDK `Usage` object a litellm response lacks → budget accounting would break or double-handle. | Use `litellm.completion_cost` + `report_state.record_observed_llm_cost` (verified to feed `get_total_llm_cost` → budget). 01 §3, 03; test 19. |
+| R5 | Med | Hooks propagate exceptions by design (`on_llm_end` raises `BudgetExceededError`); a raising `on_agent_end` runs on the agent-teardown path and could disrupt an agent. | Hook body tiny + fully wrapped (never raises); reflection runs as an exception-isolated task; skip on `budget_stopped`/`is_shutting_down` (01 §3, 03; test 20a). |
+| R6 | Low | Reflection applying via the pure helpers without the store lock races the root's `update_audit_state`. | Apply under `_audit_state_lock` (03; test 19a). |
+
+Non-issues (verified safe): non-deep scans never execute the QA wiring (no
+regression there); empty `audit_state` is safe once R1 holds; hydration is
+tolerant like the other stores; `select_tools` is unchanged so existing tool flow
+is untouched; the +2 base tools add prompt-token cost (cumulative with Tool
+Awareness's +6) but break nothing — noted, not blocking.
+
 ## 0. Resolution status (round-1 fixes applied to the spec)
 
 All round-1 findings below were applied. (Some — the `system_prompt.jinja`

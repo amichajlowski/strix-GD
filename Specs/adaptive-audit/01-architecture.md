@@ -210,21 +210,39 @@ hydrate_audit_state_from_disk(state_dir)                                   # NEW
   (`spawn_child_agent(..., hooks=hooks)` in `runner.py` ~228–240, and to the root
   run). Add an `on_agent_end(self, context, agent, output)` method (verified
   present on `RunHooks`) that, for a **child** end (`context.context["parent_id"]
-  is not None`) and when `coordinator.budget_stopped` is False, schedules
-  `reflection.run_reflection(...)` (single-flight — see 03). `on_agent_end` also
-  fires for the root; skip it (the scan is ending).
-- **Model call — `strix/core/reflection.py`.** Call the run's own model directly
-  via `litellm.acompletion(model=<STRIX_LLM>, messages=..., response_format=...)`.
-  litellm is already a dependency and globally configured in
-  `strix/config/models.py` (`set_default_openai_key`, api_base, litellm defaults),
-  and the model id comes from settings (`STRIX_LLM`, `config/settings.py:23`).
-  Resolve the model id the same way the run does (pass it in from the hook
-  context / config). Record the returned usage into `report_state` (mirror
-  `ReportUsageHooks.on_llm_end`'s `record_sdk_usage`) so reflection tokens count
-  against `--max-budget-usd`.
-- **Blackboard reads** are direct module-dict access (`loot`, `target_profile`,
-  `audit_state`, `notes`) + `evaluate_qa_gaps(...)`; a traffic digest is included
-  only when a Caido client is in the hook context. No tool calls, no agent.
+  is not None`), and unless `coordinator.budget_stopped` / `is_shutting_down`,
+  schedules `reflection.run_reflection(...)` (single-flight — see 03). Skip the
+  root end (scan ending).
+  - **Must be strictly non-raising.** Hooks propagate exceptions on purpose
+    (`on_llm_end` raises `BudgetExceededError` to stop the run), and `on_agent_end`
+    runs in the completing agent's teardown — so the hook body must be tiny and
+    fully wrapped (never raise into the caller), and the scheduled task must be
+    exception-isolated (a done-callback that logs, never re-raises). A bug in the
+    reflection must never crash an agent or the scan.
+- **Model call — `strix/core/reflection.py`.** Call the run's own model via
+  litellm (already a dependency, globally configured in `strix/config/models.py`).
+  **Resolve the model string with the same mapping the run uses** — `STRIX_LLM`
+  is a *display* form (e.g. `ollama/llama3`, `deepseek/deepseek-chat`); the run
+  routes it through `StrixProvider` (`config/models.py` ~30–44: `ollama/X` →
+  `ollama_chat/X`, `openai`/`litellm`/`any-llm` passthrough, else passthrough to
+  litellm). Passing raw `STRIX_LLM` to `litellm.acompletion` will **mis-route
+  ollama** (the likely local setup) and the reflection will silently always fail.
+  Reuse that resolution (call the shared mapping, or obtain the SDK `Model` from
+  `run_config.model_provider` and call it) — do **not** hand `STRIX_LLM` to
+  litellm unmapped. Pass the run's temperature/settings too.
+- **Budget accounting.** `record_sdk_usage` wants an SDK `Usage` object, which a
+  direct litellm response does not provide. Instead compute cost with
+  `litellm.completion_cost(response)` and call
+  `report_state.record_observed_llm_cost(cost)` — verified to feed
+  `_total_cost` → `get_total_llm_cost()` → the `on_llm_end` budget check, so
+  reflection spend still enforces `--max-budget-usd` (on the *next* model turn).
+  Skip the whole reflection if `budget_stopped` is already set.
+- **Blackboard reads must be lock-safe.** Read via the existing
+  **lock-protected** accessors (`qa_loot_summary`-style / the store `_get_*_impl`
+  / a snapshot taken under each store's lock) — **never** raw-iterate the module
+  dicts, or a concurrent agent write triggers `RuntimeError: dict changed size
+  during iteration`. Include `evaluate_qa_gaps(...)` output; include a traffic
+  digest only when a Caido client is in the hook context. No tool calls, no agent.
 
 ### 4. QA-gate integration — `strix/tools/qa_loop/`
 
@@ -233,6 +251,15 @@ hydrate_audit_state_from_disk(state_dir)                                   # NEW
   (mirror the `qa_notes_summary` / `qa_loot_summary` wiring the Tool Awareness
   build added). **`refs` must be ids/enums only (no free text) — see Secret
   discipline.**
+  > **Regression guard (hard requirement).** `review_before_finish` →
+  > `_run_review` → `_build_review_context` runs on **every deep-scan finish** and
+  > is **not** wrapped in try/except. So `qa_audit_summary()` and the new
+  > `evaluate_qa_gaps` lead rule **must be null-safe and must never raise** on an
+  > empty / missing / partially-shaped `audit_state` (the common case: the
+  > feature unused, or no reflection ran yet). If either throws, it breaks the
+  > finish gate for *all* deep scans, not just adaptive-audit users. Test the
+  > full path (`_build_review_context` + `evaluate_qa_gaps`) with an **empty**
+  > store, not only a populated one.
 - `evaluate_qa_gaps` (`rules.py` ~362) — add a small rule: open `priority=high`
   leads → a finish-blocking gap ("pursue or explicitly defer lead X"). This is
   the deterministic backstop. This is the **first** QA rule to interpolate a

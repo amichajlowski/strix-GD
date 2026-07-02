@@ -166,15 +166,31 @@ All offline. The model is **mocked** (monkeypatch `litellm.acompletion` /
     unchanged), returns cleanly, does not raise.
 18. `test_run_reflection_skips_when_budget_stopped` — `coordinator.budget_stopped`
     True → no model call, no change.
-19. `test_run_reflection_records_usage` — on a successful mocked call, usage from
-    the litellm response is recorded to `report_state` (budget accounting).
+19. `test_run_reflection_records_cost` — on a successful mocked call, cost from a
+    mocked `litellm.completion_cost` is recorded via
+    `report_state.record_observed_llm_cost` and is reflected in
+    `get_total_llm_cost()` (budget accounting; **not** `record_sdk_usage`).
+19a. `test_run_reflection_reads_lock_safe` — `run_reflection` snapshots the stores
+    via the lock-protected accessors (regression guard against
+    `dict changed size during iteration`); assert it does not raw-iterate (e.g.
+    it still succeeds when a store dict mutates during the snapshot, using a
+    controllable fake) and applies under `_audit_state_lock`.
 20. `test_on_agent_end_triggers_for_child_not_root` — a child end
     (`parent_id` set) schedules a reflection; a root end (`parent_id is None`)
     does not (assert via a monkeypatched `run_reflection` counter; fake context).
+20a. `test_on_agent_end_never_raises` — if the scheduled reflection raises,
+    `on_agent_end` still returns normally (the hook is on the agent-teardown path
+    and must never crash an agent); also skips when `budget_stopped`/
+    `is_shutting_down`.
 21. `test_reflection_single_flight_coalesces` — two near-simultaneous child ends
     while a reflection is "running" result in at most one extra run (drive the
     lock/`dirty` logic with a controllable fake).
-22. `test_qa_gap_for_open_high_lead` — seed an open `priority=high` lead,
+22. `test_qa_review_context_safe_on_empty_audit_state` — **regression guard.**
+    With an **empty** `audit_state` (feature unused / no reflection yet), call the
+    full `_build_review_context(...)` + `evaluate_qa_gaps(...)` and assert it
+    returns cleanly, adds no blocking gap, and does not raise. `_run_review` is
+    unguarded, so a throw here would break the finish gate for every deep scan.
+22a. `test_qa_gap_for_open_high_lead` — seed an open `priority=high` lead,
     `evaluate_qa_gaps` → a finish-blocking gap naming the lead.
 23. `test_no_qa_gap_when_lead_done_dropped_or_lower` — `done`/`dropped`/`medium`/
     `low` → no blocking gap.
