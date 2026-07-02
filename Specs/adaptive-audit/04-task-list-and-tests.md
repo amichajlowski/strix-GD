@@ -73,12 +73,15 @@ line (read `get_audit_state` before new surface); add the per-file-ignore in
 Create `strix/core/reflection.py` with the pure `build_reflection_input(snapshot)`
 and `apply_reflection(result)` and the impure `run_reflection(*, model,
 caido_client)` per [03-strategist-loop.md](03-strategist-loop.md). `run_reflection`
-snapshots the blackboard (loot/target_profile/audit_state/notes module dicts +
-`evaluate_qa_gaps` + optional traffic digest), calls `litellm.acompletion` on the
-run's model with structured output, parses tolerantly (retry once, else skip),
-applies via the Feature-1 pure helpers, and records usage into `report_state`.
-Single-flight (`asyncio.Lock` + `dirty` flag). Keep the reflection prompt as a
-module constant. **No agent, no tools, no `skills/` file.**
+snapshots the blackboard via the **lock-protected accessors** (loot/target_profile/
+audit_state/notes summaries + `evaluate_qa_gaps` + optional traffic digest), calls
+the model by mirroring `strix/report/dedupe.py` (`StrixProvider().get_model(
+resolved_model).get_response(...)` — reuses routing, no manual mapping), parses the
+text tolerantly (prompt-instructed JSON; retry once, else skip), applies via the
+Feature-1 pure helpers **under `_audit_state_lock`**, and records usage via
+`report_state.record_sdk_usage(usage=resp.usage)`. Single-flight (`asyncio.Lock` +
+`dirty` flag). Keep the reflection prompt as a module constant. **No agent, no
+tools, no `skills/` file, no hand-rolled litellm call.**
 
 ### Task 2.2 — Deterministic trigger
 Add `on_agent_end` to `strix/core/hooks.py` (`ReportUsageHooks` or a sibling
@@ -147,8 +150,9 @@ Prefer pure/mocked tests. Use `XXXX` for all placeholders.
 
 ### `tests/test_reflection_loop.py`
 
-All offline. The model is **mocked** (monkeypatch `litellm.acompletion` /
-`reflection`'s call site) — no live LLM/Docker/Caido.
+All offline. The model is **mocked** (monkeypatch `reflection`'s
+`model.get_response` call site / `StrixProvider.get_model`) — no live
+LLM/Docker/Caido.
 
 14. `test_build_reflection_input_is_pure` — given a snapshot (prior thesis, loot
     refs by id, target profile, current QA gaps), returns chat messages that
@@ -166,10 +170,10 @@ All offline. The model is **mocked** (monkeypatch `litellm.acompletion` /
     unchanged), returns cleanly, does not raise.
 18. `test_run_reflection_skips_when_budget_stopped` — `coordinator.budget_stopped`
     True → no model call, no change.
-19. `test_run_reflection_records_cost` — on a successful mocked call, cost from a
-    mocked `litellm.completion_cost` is recorded via
-    `report_state.record_observed_llm_cost` and is reflected in
-    `get_total_llm_cost()` (budget accounting; **not** `record_sdk_usage`).
+19. `test_run_reflection_records_usage` — on a successful mocked `get_response`
+    (returning a usage object), `report_state.record_sdk_usage(usage=resp.usage)`
+    is called and the spend reaches `get_total_llm_cost()` (budget accounting,
+    exactly as `report/dedupe.py` does).
 19a. `test_run_reflection_reads_lock_safe` — `run_reflection` snapshots the stores
     via the lock-protected accessors (regression guard against
     `dict changed size during iteration`); assert it does not raw-iterate (e.g.

@@ -219,24 +219,26 @@ hydrate_audit_state_from_disk(state_dir)                                   # NEW
     fully wrapped (never raise into the caller), and the scheduled task must be
     exception-isolated (a done-callback that logs, never re-raises). A bug in the
     reflection must never crash an agent or the scan.
-- **Model call — `strix/core/reflection.py`.** Call the run's own model via
-  litellm (already a dependency, globally configured in `strix/config/models.py`).
-  **Resolve the model string with the same mapping the run uses** — `STRIX_LLM`
-  is a *display* form (e.g. `ollama/llama3`, `deepseek/deepseek-chat`); the run
-  routes it through `StrixProvider` (`config/models.py` ~30–44: `ollama/X` →
-  `ollama_chat/X`, `openai`/`litellm`/`any-llm` passthrough, else passthrough to
-  litellm). Passing raw `STRIX_LLM` to `litellm.acompletion` will **mis-route
-  ollama** (the likely local setup) and the reflection will silently always fail.
-  Reuse that resolution (call the shared mapping, or obtain the SDK `Model` from
-  `run_config.model_provider` and call it) — do **not** hand `STRIX_LLM` to
-  litellm unmapped. Pass the run's temperature/settings too.
-- **Budget accounting.** `record_sdk_usage` wants an SDK `Usage` object, which a
-  direct litellm response does not provide. Instead compute cost with
-  `litellm.completion_cost(response)` and call
-  `report_state.record_observed_llm_cost(cost)` — verified to feed
-  `_total_cost` → `get_total_llm_cost()` → the `on_llm_end` budget check, so
-  reflection spend still enforces `--max-budget-usd` (on the *next* model turn).
-  Skip the whole reflection if `budget_stopped` is already set.
+- **Model call — mirror `strix/report/dedupe.py` (the proven standalone-call
+  pattern).** Strix already makes one-shot model calls outside the Runner in
+  `report/dedupe.py:189–214` (and `interface/main.py:257`). Copy that shape:
+  `configure_sdk_model_defaults(settings)`; `model =
+  StrixProvider().get_model(resolved_model)`; `resp = await model.get_response(
+  system_instructions=<reflection prompt>, input=<snapshot json>,
+  model_settings=ModelSettings(retry=..., include_usage=True), tools=[],
+  output_schema=None, handoffs=[], tracing=ModelTracing.DISABLED, ...)`. This
+  **reuses the run's exact model routing** (so `ollama/…` → `ollama_chat/…` etc.
+  is handled by `StrixProvider` — no manual mapping, dissolves the earlier R2),
+  and it returns an SDK response whose `.usage` feeds `record_sdk_usage`
+  directly (dissolves R4). `resolved_model` is the settings `STRIX_LLM`. Parse the
+  text with a tolerant JSON extractor (dedupe uses prompt-instructed JSON +
+  `_extract_text` + a tolerant parser, not `response_format` — the more robust
+  choice for local models).
+- **Budget accounting.** After the call, `report_state.record_sdk_usage(
+  agent_id="reflection", usage=resp.usage, model=resolved_model)` — exactly as
+  dedupe does — so reflection tokens feed `get_total_llm_cost()` → the
+  `on_llm_end` budget check. Skip the whole reflection if `budget_stopped` is
+  already set.
 - **Blackboard reads must be lock-safe.** Read via the existing
   **lock-protected** accessors (`qa_loot_summary`-style / the store `_get_*_impl`
   / a snapshot taken under each store's lock) — **never** raw-iterate the module

@@ -73,7 +73,7 @@ async def on_agent_end(self, context, agent, output) -> None:
             or getattr(coordinator, "is_shutting_down", False)
         ):
             return                  # respect budget stop / shutdown
-        model = <resolved via StrixProvider mapping — NOT raw STRIX_LLM>
+        model = <settings STRIX_LLM>   # StrixProvider().get_model() handles routing
         _schedule_reflection(model=model, caido_client=ctx.get("caido_client"))
     except Exception:               # noqa: BLE001 — a reflection bug must not crash an agent
         logger.exception("on_agent_end reflection scheduling failed")
@@ -117,37 +117,34 @@ matching the `apply_reflection` schema (thesis, assumptions[], leads[],
 lead_updates[]). Low temperature. If nothing material changed, return an empty
 delta.
 
-## Structured output on local models (must be tolerant)
+## Model call, resolution, and structured output — mirror `report/dedupe.py`
 
-Local models vary in `response_format`/JSON-schema support. `run_reflection`
-must:
-1. request structured output (`response_format={"type": "json_schema", ...}` via
-   litellm) **and** restate the schema in the prompt;
-2. parse tolerantly — extract the first JSON object, tolerate extra prose;
-3. on parse failure, **retry once**; on a second failure, log and **skip this
-   reflection** (leave `audit_state` unchanged) — never crash the run.
+Do **not** hand-roll a litellm call or a model-name mapping. Strix already makes
+a standalone one-shot model call outside the Runner in
+`strix/report/dedupe.py:189–214`; copy it:
 
-## Model resolution (must reuse the run's mapping)
+- `configure_sdk_model_defaults(settings)`, then
+  `model = StrixProvider().get_model(resolved_model)` — `resolved_model` is the
+  settings `STRIX_LLM`. `get_model` applies the run's routing (`ollama/X` →
+  `ollama_chat/X`, etc.), so there is **nothing to map by hand** — this is why the
+  reflection uses the same model the audit uses, on any provider.
+- `resp = await model.get_response(system_instructions=<reflection prompt>,
+  input=<snapshot JSON>, model_settings=ModelSettings(retry=..., include_usage=
+  True), tools=[], output_schema=None, handoffs=[], tracing=DISABLED, ...)`.
+- **Structured output the robust way:** like dedupe, instruct "respond with ONLY
+  the JSON object" in the prompt and parse the text tolerantly (extract the first
+  JSON object, tolerate prose) — do **not** rely on `response_format`/JSON-schema
+  (uneven on local models). On parse failure **retry once**; on a second failure
+  log and **skip** (leave `audit_state` unchanged) — never crash.
 
-`STRIX_LLM` is a display form (`ollama/llama3`, `deepseek/deepseek-chat`, …); the
-run routes it through `StrixProvider` (`config/models.py` ~30–44) which maps
-`ollama/X` → `ollama_chat/X` and passes other prefixes through to litellm.
-`run_reflection` **must apply the same mapping** (call the shared resolver, or get
-the SDK `Model` from `run_config.model_provider` and call it) — passing raw
-`STRIX_LLM` to `litellm.acompletion` mis-routes ollama (the likely local setup)
-and the reflection would silently always fail. Pass the run's temperature too.
+## Budget accounting
 
-## Budget accounting (do not make reflection invisible)
-
-The direct litellm call spends tokens outside the SDK usage hook, so it must be
-recorded or it escapes `--max-budget-usd`:
-- skip entirely if `coordinator.budget_stopped`;
-- after the call, compute cost with `litellm.completion_cost(response)` and call
-  `report_state.record_observed_llm_cost(cost)` — **not** `record_sdk_usage`
-  (which needs an SDK `Usage` object a litellm response doesn't provide).
-  `record_observed_llm_cost` feeds `_total_cost` → `get_total_llm_cost()` → the
-  `on_llm_end` budget check, so reflection spend still enforces the budget (caught
-  on the next model turn). Verified against `report/usage.py`.
+`get_response` returns an SDK response with `.usage`, so record it exactly as
+dedupe does: `report_state.record_sdk_usage(agent_id="reflection",
+usage=resp.usage, model=resolved_model)`. That feeds `_total_cost` →
+`get_total_llm_cost()` → the `on_llm_end` budget check, so reflection spend
+enforces `--max-budget-usd` (caught on the next model turn). Skip the whole
+reflection if `coordinator.budget_stopped` is already set.
 
 ## QA-gate integration (the enforcement)
 
@@ -212,15 +209,16 @@ local model. Also phase-2: event triggers beyond child-completion (e.g. a
   supersede + leads) and **ignores malformed items without raising**; covered.
 - `run_reflection` skips cleanly (no change, no raise) on a parse failure after
   one retry, and when `budget_stopped` is set (both covered with a mocked
-  litellm — no live model).
+  `model.get_response` — no live model).
 - `run_reflection` reads via the lock-protected accessors (does not raw-iterate
   the store dicts) and applies under `_audit_state_lock`.
 - The `on_agent_end` trigger fires the reflection for a **child** end and **not**
   for a root end; single-flight coalescing runs at most one extra reflection for
   a burst; **the hook never raises** even if the scheduled reflection blows up
   (covered with a fake coordinator/hook, no live model).
-- Reflection cost is recorded via `record_observed_llm_cost` and reaches
-  `get_total_llm_cost()` (covered with a mocked `litellm.completion_cost`).
+- Reflection usage is recorded via `record_sdk_usage(usage=resp.usage)` (like
+  `report/dedupe.py`) and reaches `get_total_llm_cost()` (covered with a mocked
+  `model.get_response` returning a usage object).
 - **Regression guard:** `_build_review_context` + `evaluate_qa_gaps` run cleanly
   and block nothing when `audit_state` is **empty** (feature unused) — the
   unguarded finish path must not break for non-adaptive scans.

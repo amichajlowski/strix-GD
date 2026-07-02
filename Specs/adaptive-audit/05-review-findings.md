@@ -45,9 +45,9 @@ regressions to the existing audit. Verified against the tree; all fixed in-spec.
 | # | Sev | Regression / misalignment | Fix applied |
 |---|-----|---------------------------|-------------|
 | R1 | High | `review_before_finish → _run_review → _build_review_context` runs on **every deep-scan finish** and is **not** wrapped in try/except (confirmed). A throw in the new `qa_audit_summary()` or lead-gap rule would break the finish gate for *all* deep scans, feature-used or not. | Hard requirement + test: `qa_audit_summary` and the lead rule must be null-safe / never raise on empty/missing `audit_state`; regression test runs the full path on an **empty** store (01 §4, 03 acceptance, 04 test 22). |
-| R2 | High | The run resolves models via `StrixProvider` (`ollama/X → ollama_chat/X`); the spec's raw `litellm.acompletion(model=STRIX_LLM)` would **mis-route ollama** (the likely local setup) → reflection silently always fails → feature dead. | Reuse the `StrixProvider` mapping (or the SDK `Model` from `run_config.model_provider`); never hand raw `STRIX_LLM` to litellm (01 §3, 03 "Model resolution"). |
+| R2 | High | The run resolves models via `StrixProvider` (`ollama/X → ollama_chat/X`); the spec's raw `litellm.acompletion(model=STRIX_LLM)` would **mis-route ollama** (the likely local setup) → reflection silently always fails → feature dead. | **Dissolved (see §0.3):** mirror `report/dedupe.py` — `StrixProvider().get_model(STRIX_LLM).get_response(...)` reuses the run's routing; no manual mapping, no raw litellm. |
 | R3 | Med | Reflection raw-iterating the store module-dicts while agents write → `RuntimeError: dict changed size during iteration`. | Read via the lock-protected accessors / snapshot under each store lock (01 §3, 03; test 19a). |
-| R4 | Med | `record_sdk_usage` needs an SDK `Usage` object a litellm response lacks → budget accounting would break or double-handle. | Use `litellm.completion_cost` + `report_state.record_observed_llm_cost` (verified to feed `get_total_llm_cost` → budget). 01 §3, 03; test 19. |
+| R4 | Med | `record_sdk_usage` needs an SDK `Usage` object a raw litellm response lacks → budget accounting would break. | **Dissolved (see §0.3):** `get_response` returns an SDK response with `.usage`, so `record_sdk_usage(usage=resp.usage)` is correct (as `report/dedupe.py` does). 01 §3, 03; test 19. |
 | R5 | Med | Hooks propagate exceptions by design (`on_llm_end` raises `BudgetExceededError`); a raising `on_agent_end` runs on the agent-teardown path and could disrupt an agent. | Hook body tiny + fully wrapped (never raises); reflection runs as an exception-isolated task; skip on `budget_stopped`/`is_shutting_down` (01 §3, 03; test 20a). |
 | R6 | Low | Reflection applying via the pure helpers without the store lock races the root's `update_audit_state`. | Apply under `_audit_state_lock` (03; test 19a). |
 
@@ -56,6 +56,39 @@ regression there); empty `audit_state` is safe once R1 holds; hydration is
 tolerant like the other stores; `select_tools` is unchanged so existing tool flow
 is untouched; the +2 base tools add prompt-token cost (cumulative with Tool
 Awareness's +6) but break nothing — noted, not blocking.
+
+## 0.3 Final deep pass — anchors verified, R2/R4 dissolved
+
+Every Design-B anchor was executed/read against the tree. All present and behave
+as the spec assumes:
+
+- **`RunHooks.on_agent_end` / `on_tool_end` exist** (`uv run python` introspection)
+  and `ReportUsageHooks` is passed to every agent + the root run.
+- **Hook context is reachable:** the inner context dict carries `agent_id`,
+  `parent_id`, `coordinator`, `caido_client` (`runner.py:242–251`); children set
+  `parent_id` (`execution.py:615–616`); hooks read `context.context` exactly as
+  `on_llm_end` does. So the child-vs-root filter and `caido_client` access are
+  real.
+- **`coordinator.budget_stopped`** (property) and **`is_shutting_down`** (attr,
+  `agents.py:55/71`) both exist for the skip guards.
+- **Standalone model call has proven prior art:** `report/dedupe.py:189–214` and
+  `interface/main.py:257` already do `StrixProvider().get_model(name)
+  .get_response(...)` outside the Runner, record `resp.usage` via
+  `record_sdk_usage`, and tolerantly parse prompt-instructed JSON — an exact
+  template for the reflection. **Adopting it dissolves R2 and R4:** `get_model`
+  reuses the run's routing (no manual `ollama_chat` mapping), and `resp.usage`
+  makes `record_sdk_usage` correct (no `completion_cost`/`observed_cost` needed).
+  The spec (01 §3, 03) now mandates mirroring dedupe.
+- **`record_sdk_usage` → budget:** feeds `_total_cost` → `get_total_llm_cost()` →
+  the `on_llm_end` `BudgetExceededError` check (`report/usage.py`, `hooks.py`).
+- **`_run_review` unguarded** (`qa_loop/tool.py`) — R1's regression guard stands;
+  the empty-store full-path test (04 test 22) covers it.
+
+**Conclusion: no remaining problems, regressions, or audit-breakers.** The design
+touches two shared hot paths (the QA finish gate and the lifecycle hooks); both
+are covered by explicit, tested guards (R1 null-safe QA; R5 non-raising hook).
+The model call now reuses an existing in-tree pattern rather than new plumbing.
+**Verdict: GO — ready to build.**
 
 ## 0. Resolution status (round-1 fixes applied to the spec)
 
@@ -104,9 +137,9 @@ Change log:
   the strategist child, with **no** `select_tools` change. Correct.
 - Child reaches the blackboard: `get_loot`/`get_target_profile`/`traffic_health`/
   `list_notes` are all in `_BASE_TOOLS`. Correct.
-- `create_agent(name, task, inherit_context, skills)` accepts
-  `skills=["audit_strategy"]`; `validate_requested_skills` passes once the skill
-  file exists. `send_message_to_agent`/`wait_for_message` signatures match.
+- *(Round-1 only; superseded by §0.1 — Design B spawns no strategist agent, so
+  `create_agent`/`skills` are not used by this feature. `send_message_to_agent`/
+  `wait_for_message` remain the root's existing interrupt/collect tools.)*
 - QA wiring (`_build_review_context` + `evaluate_qa_gaps`) extends cleanly, and
   the new blocking gap flows through `_qa_review_blocker` → blocks `finish_scan`.
   Backstop mechanism verified end-to-end (deep scans).
