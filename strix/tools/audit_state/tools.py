@@ -583,7 +583,9 @@ async def update_audit_state(
         reason: Supersede reason (assumption) OR lead rationale — one per call.
         lead: Lead text to add.
         priority: Required with ``lead`` — low | medium | high.
-        lead_id: Existing lead to update.
+        lead_id: Existing lead to update. Do not set ``lead`` (create) and
+            ``lead_id`` (update) in the same call — the returned ``lead_id``
+            would then reflect only the update, not the created lead.
         lead_status: New lead status — open | in_progress | done | dropped.
         refs: Evidence ids (loot_id/note_id) for the assumption/lead written.
     """
