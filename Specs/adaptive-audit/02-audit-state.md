@@ -1,6 +1,6 @@
 # Feature 1 — Audit State Store
 
-**Priority: build first. Independently useful; the strategist loop (Feature 2)
+**Priority: build first. Independently useful; the reflection loop (Feature 2)
 writes into it.**
 
 ## What it does
@@ -198,8 +198,8 @@ immutability convention — return new dicts, do not mutate the argument.
   `audit_state.json` hydrates to an empty document without raising.
 - `qa_audit_summary` `refs` carry **ids/enums only** (no `text` field); free text
   appears only in `signals` (scrubbed, in-memory). No raw values anywhere.
-- No raw secret value can be stored (documented + covered by a test that a
-  loot-value-looking string is the caller's responsibility — the store does not
-  fetch loot; it only stores what it is given, so the guard is the strategist
-  skill + the "ids only" convention, tested via `qa_audit_summary` carrying no
-  value field).
+- Raw secret values are guarded in depth: the "ids only" reflection-prompt
+  convention **plus** the write-time `scrub_secrets` backstop in
+  `update_audit_state` (test 11a) **plus** `qa_audit_summary` carrying no value
+  field. The store does not fetch loot; it only stores (scrubbed) what it is
+  given.

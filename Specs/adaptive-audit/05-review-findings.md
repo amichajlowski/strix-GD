@@ -6,10 +6,43 @@ each verified against the current tree: an **architecture/alignment** pass
 and a **security** pass (secret discipline of the derived-intel store). No
 implementation.
 
-## 0. Resolution status (fixes applied to the spec)
+## 0.1 Functional review (round 2) — vehicle change to a code path
 
-All blocking and should-fix findings below have been applied to the spec docs.
-The verdict is now **GO** — a smaller agent can execute the spec as written.
+A second, deeper pass traced the *runtime mechanism* (not just anchors) and found
+that the round-1 design's vehicle — a **strategist child agent** — had multiple
+functional failure modes, all rooted in "the strategist is a full child agent."
+Verified against the tree, then fixed by switching Feature 2 to a **dedicated
+reflection code path** triggered by `on_agent_end` and calling the run's model
+directly via `litellm`. What changed and why:
+
+| # | Sev | Problem (round-1 design) | Resolution (code-path design) |
+|---|-----|--------------------------|-------------------------------|
+| F1 | High | Self-trigger loop: "reflect after any child ends" + the strategist *is* a child → it triggers itself. | Reflection is not an agent → cannot fire `on_agent_end`; the trigger also filters to child ends only. Bug cannot occur. |
+| F2 | High | `create_agent` enforces `_MAX_ACTIVE_CHILDREN_PER_PARENT`; a busy root can't spawn the strategist exactly when reflection matters. | No spawn — a code path has no child-cap interaction. |
+| F3 | High | Prompt-convention trigger is the weak link on local models; the "deterministic trigger = execution-loop surgery" claim was wrong. | `RunHooks.on_agent_end` verified to exist and the hooks object is already wired to every agent → deterministic trigger is cheap and is now v1. |
+| F4 | Med | "non-blocking integration" contradicted "spawn strategist and WAIT". | Reflection scheduled as a non-blocking task; contradiction gone. |
+| F5 | Med | `create_agent(inherit_context=True)` would inherit the root's bloated context, defeating "focused context". | Snapshot assembled in code — focused by construction, nothing inherited. |
+| F6 | Med | A child strategist holds Shell + `create_agent` + finish/report → "analysis only" is prompt-only; can violate single authority. | The code path has **no tools** → single authority enforced structurally. |
+| F7 | Med | Finish-gate livelock if leads are minted faster than closed. | Lead-gaps reuse the existing `acknowledged_gaps` path ("defer" = ack); + cap on open-high leads + sparing-`high` prompt guidance. |
+| F8 | Low | Strategist ignored the existing `evaluate_qa_gaps` output. | The snapshot now includes current QA gaps as an input. |
+| N1 | Med | Local models vary in structured-output support. | Tolerant parse + one retry + clean skip; never crashes. |
+| N2 | Med | A direct model call escapes the SDK usage hook → invisible to `--max-budget`. | Reflection records its litellm usage into `report_state`; skips when `budget_stopped`. |
+| N3 | Low | Childless / non-deep runs. | Documented scope limits: child-completion-keyed trigger; deep-only finish backstop. |
+
+Net: the code-path vehicle removed four failure modes by construction, made the
+trigger deterministic, and made the whole loop **unit-testable** (the strategist
+agent would have been manual-smoke-only). It is more code than reusing
+`create_agent`, but that reuse was not actually functional. Feasibility verified:
+`litellm` is already a dependency, globally configured in
+`strix/config/models.py`, model id from `STRIX_LLM`; `on_agent_end` exists on
+`RunHooks`.
+
+## 0. Resolution status (round-1 fixes applied to the spec)
+
+All round-1 findings below were applied. (Some — the `system_prompt.jinja`
+root-only anchor, the `review_findings` removal — are now moot because Feature 2
+no longer spawns an agent at all; they remain logged for history.) The verdict
+after both rounds is **GO** — a smaller agent can execute the spec as written.
 Change log:
 
 | # | Sev | Fixed in | What changed |

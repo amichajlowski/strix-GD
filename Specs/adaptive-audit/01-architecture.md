@@ -18,41 +18,46 @@ This feature adds that layer with **one new store** and **one delegated
 reflection loop**, reusing the child-spawn path and the QA-gate machinery.
 
 ```
-                    ┌───────────────────────────────────────────────┐
-                    │  Root agent (orchestrator + sole authority)     │
-                    │  spawn/stop/interrupt children · finish gate    │
-                    └───┬───────────────────────────────▲────────────┘
-      at a boundary,    │ 1. create_agent(               │ 4. read revised
-      root spawns       ▼    skills=["audit_strategy"])  │    thesis+leads via
-      the strategist   ┌──────────────────────┐         │    get_audit_state,
-                       │ Strategist (delegated)│         │    act (retask,
-                       │  audit_strategy skill │         │    spawn, interrupt)
-                       │  reads blackboard,    │─────────┘
-                       │  writes thesis        │ 3. update_audit_state
-                       └───┬──────────▲────────┘   (supersede-with-reason)
-              2. read      │          │
-        ┌──────────────────┼──────────┼──────────────────────────┐
-        ▼                  ▼          ▼                           ▼
-   ┌─────────┐      ┌──────────┐ ┌───────────────┐      ┌──────────────────┐
-   │ loot    │      │ notes    │ │ target_profile│      │ audit_state (NEW) │
-   │         │      │(findings)│ │ + traffic     │      │ thesis·assumptions│
-   └─────────┘      └──────────┘ └───────────────┘      │ ·leads (blackboard)│
-        the blackboard (shared, persisted, all-agent-visible)   └──────────────────┘
+   specialist child ends ─► on_agent_end hook (deterministic, single-flight)
+                                     │ triggers
+                                     ▼
+                       ┌──────────────────────────┐
+                       │ Reflection step (code)    │  one structured LLM call
+                       │  strix/core/reflection.py │  on the run's own model,
+                       │  reads blackboard,        │  no tools, no agent
+                       │  writes thesis            │
+                       └───┬──────────────▲────────┘
+        reads snapshot     │              │ writes (pure store helpers,
+   ┌───────────────────────┼──────────────┼───  supersede-with-reason)
+   ▼        ▼        ▼      ▼              ▼
+ loot   notes    target_profile     ┌──────────────────┐
+ (refs) (findings) + traffic +      │ audit_state (NEW) │
+        current QA gaps             │ thesis·assumptions│
+   the blackboard (shared/persisted)│ ·leads            │
+                                    └────────▲─────────┘
+                    ┌────────────────────────┼───────────────────────┐
+                    │ Root agent (sole authority)                     │
+                    │ reads get_audit_state, acts (spawn/stop/        │
+                    │ interrupt, mark leads done/dropped), finish gate│
+                    └─────────────────────────────────────────────────┘
 ```
 
 ## Roles (authority stays singular)
 
-- **Strategist** — analysis only. A normal Strix child agent spawned through the
-  existing path with a dedicated `audit_strategy` skill and a narrow task:
-  *read the blackboard, reconcile it against the prior thesis, write the revised
-  thesis/assumptions/leads into `audit_state`.* It **never** spawns, stops, or
-  interrupts agents, and never files vuln reports. Its "output" is its
-  structured writes to `audit_state` — exactly as recon's output is its writes
-  to `target_profile`. Delegating it keeps deep analysis **out of the root's
-  context** (the anti-context-rot win).
-- **Root** — the only actor. Reads the revised `audit_state`, decides, and
-  executes: retask/spawn/stop children, interrupt a running child, and hold the
-  finish gate.
+- **Reflection step** — analysis only. A **dedicated code path**
+  (`strix/core/reflection.py`), not an agent: triggered deterministically when a
+  specialist child finishes, it assembles a focused blackboard snapshot in code,
+  makes **one structured LLM call on the run's own model**, and writes the
+  revised thesis/assumptions/leads into `audit_state` via the pure store helpers.
+  It has **no tools** — so structurally it cannot spawn, test, interrupt, or file
+  reports (single authority is enforced by construction, not by prompt). Building
+  the snapshot in code keeps deep analysis **out of the root's context** (the
+  anti-context-rot win) and gives a bounded, controllable input — the reason this
+  is a code path and not a strategist child agent (see
+  [05-review-findings.md](05-review-findings.md) §0.1).
+- **Root** — the only actor. Reads the refreshed `audit_state`, decides, and
+  executes: retask/spawn/stop children, interrupt a running child, mark leads
+  `done`/`dropped`, and hold the finish gate.
 - **Children** — do the testing, write discoveries to the blackboard, and
   **re-read `audit_state` before starting a new surface** (prompt convention).
 
@@ -64,74 +69,80 @@ child agent completing, or a significant event (new confirmed finding, a
 call** — reflecting on partial mid-batch state produces flip-flopping, less
 consistent steering.
 
-**Primary mechanism (v1 — reuse `create_agent`, add no new tool):** the root
-spawns the strategist through the **existing** `create_agent(name="Audit
-Strategist", skills=["audit_strategy"], ...)` path, waits for it with
-`wait_for_message`, then reads `get_audit_state`. The **root convention** (in
-`strix/skills/coordination/root_agent.md` — see §5) requires: *after every
-`wait_for_message` that returns a completed child, spawn the audit strategist and
-read `get_audit_state` before dispatching new work.* No bespoke reflection tool —
-it would only wrap `create_agent` + `wait_for_message` + `get_audit_state`, which
-all exist.
+**Primary mechanism (v1 — deterministic, no new tool, no agent):** a lifecycle
+hook fires the reflection when a specialist child finishes. `RunHooks` (already
+subclassed by `ReportUsageHooks` in `strix/core/hooks.py`, passed to every agent)
+exposes `on_agent_end`. Add `on_agent_end` handling that, for a **child** end
+(`parent_id is not None`), schedules `reflection.run_reflection(...)`. This does
+not depend on the model remembering to do anything — it fires by construction.
+See 03 for the hook body, single-flight coalescing, and budget handling.
 
-**Deterministic backstop (this is what makes it consistent, not the prompt):**
-the **finish gate cannot pass while high-priority leads are unpursued.** Extend
-`evaluate_qa_gaps` with an `audit_state` rule (see 03): open `priority=high`
-leads with `status=open` become a finish-blocking gap. So even if the root skips
-a mid-audit reflection, the audit cannot *finish* without reconciling the
-thesis. Consistency is enforced by the gate, not by the model remembering.
+- **Single-flight + coalesce:** a burst of near-simultaneous child completions
+  (parallel specialists) collapses to one running reflection + at most one
+  re-run, via an `asyncio.Lock` + `dirty` flag. No per-completion thrash.
+- **Non-blocking:** scheduled as a task so the completing child's teardown isn't
+  blocked; the root sees the update on its next `get_audit_state`.
+
+**Deterministic backstop (finish gate):** the **finish gate cannot pass while
+high-priority leads are unpursued.** Extend `evaluate_qa_gaps` with an
+`audit_state` rule (see 03): open `priority=high` leads become a finish-blocking
+gap, deferrable via the existing `acknowledged_gaps` path or by marking the lead
+`done`/`dropped`.
 
 > **Scope of the backstop: deep scans only.** The QA gate is gated on
-> `qa_loop_enabled`, which is `scan_mode == "deep"` (`runner.py` ~250;
-> `finish/tool.py::_qa_review_blocker` returns early otherwise). On
-> quick/standard scans the loop degrades to **prompt-convention-only** (no
-> deterministic backstop). This is acceptable — non-deep scans are shallow by
-> design — but state it; do not claim the audit "cannot complete un-reconciled"
-> unconditionally.
+> `qa_loop_enabled == (scan_mode == "deep")` (`runner.py` ~250;
+> `finish/tool.py::_qa_review_blocker` returns early otherwise). On quick/standard
+> scans the reflection still runs and writes the thesis, but nothing blocks
+> finish on unpursued leads. Also: the trigger is **child-completion-keyed**, so a
+> run where the root does everything itself with no child agents auto-reflects
+> only at the finish gate. Both are acceptable for v1 (the loop targets
+> multi-agent deep audits) — state them, don't paper over them.
 
-> **Deferred (phase-2, do NOT build in v1), in ascending order of plumbing:**
-> (a) a thin root-only `review_findings` convenience tool that wraps
-> spawn→wait→return-leads with a debounce, *if* freehand orchestration proves
-> unreliable on the target local model; (b) a fully deterministic trigger that
-> auto-runs the strategist from the child-completion seam in
-> `strix/core/execution.py` / the coordinator status transition — more consistent
-> still, but touches the execution loop. The v1 prompt-convention +
-> finish-gate backstop makes both unnecessary to start. Naming them keeps v1
-> lean without losing the upgrade path.
+> **Deferred (phase-2, do NOT build in v1):** (a) multi-sample self-consistency
+> or a critic pass over the reflection, if a single pass proves inconsistent on
+> the target local model; (b) additional event triggers beyond child-completion
+> (e.g. a `traffic_health` regime change) via `on_tool_end`. The v1
+> on_agent_end trigger + finish-gate backstop is enough to start.
 
 ## Propagation paths
 
-- **In (findings → strategist):** passive. The strategist *reads* the blackboard
-  each run (`get_loot`, `get_target_profile`, `traffic_health`, `list_notes`,
-  `get_audit_state`). Because state is shared+persisted, it sees everything every
-  child wrote, across resume. No per-finding wiring.
+- **In (findings → reflection):** passive. The reflection step *reads* the
+  blackboard directly each run (the `loot` / `target_profile` / `audit_state` /
+  `notes` module dicts, plus current `evaluate_qa_gaps` output, plus a traffic
+  digest when a Caido client is available). Because state is shared+persisted, it
+  sees everything every child wrote, across resume. No per-finding wiring.
 - **Out (thesis → the audit):** two paths.
   - *Passive:* the revised `audit_state` is on the blackboard; children re-read
-    it before new surface; the root reads `get_audit_state` after the strategist
-    finishes.
+    it before new surface; the root reads `get_audit_state` after a reflection
+    lands.
   - *Active:* for urgent steers the **root** interrupts a running child via the
     existing `send_message_to_agent` (`interrupt_on_message`) — e.g. "WAF now
-    present, switch to evasion." Only the root does this.
+    present, switch to evasion." Only the root does this; the reflection step has
+    no tools and cannot act.
 
 ## Consistency mechanisms (the quality levers)
 
 Cost is not a constraint (local models), so lean on quality/consistency, but
 keep the *core* lean:
 
-1. **Supersede-with-reason (keystone, core).** The strategist reads the prior
-   thesis and must express a change as a supersede (old assumption/lead marked
+1. **Supersede-with-reason (keystone, core).** The reflection reads the prior
+   thesis and must express a change as a supersede (old assumption marked
    `superseded`, new one links `supersedes: <id>` with a `reason` and updated
    `confidence`) — never a blind rebuild. `audit_state` is append-with-supersede,
    so steering is one continuous line, not independent snapshots that thrash.
-2. **Structured writes (core).** `update_audit_state` validates shape/enums and
-   bounds every field (like `loot`/`target_profile`), so a weaker local model
-   cannot drift the thesis into free-form mush.
-3. **Focused context (core).** The strategist reads only the blackboard + prior
-   thesis, not the whole run transcript — smaller, cleaner context, which local
-   models handle markedly better, and continuity lives in `audit_state` rather
-   than the strategist's own history (so re-spawn per boundary is fine).
+2. **Structured, validated, tolerantly-parsed output (core).** The reflection
+   requests structured JSON on the run's own model; `apply_reflection` validates
+   shape/enums and bounds every field (like `loot`/`target_profile`). Local
+   models vary in JSON-schema support, so parsing is tolerant with one retry and
+   a clean skip on failure (see 03) — never a crash, never free-form mush in the
+   store.
+3. **Focused context (core).** The snapshot is assembled in code from the
+   blackboard + prior thesis — not inherited from the root's transcript — so the
+   input is small and clean (which local models handle markedly better) and
+   continuity lives in `audit_state`. This is *why* it's a code path, not a child
+   agent (a child would inherit the root's bloated context).
 4. **Self-consistency / critic pass (OPTIONAL, phase-2 — documented, not core).**
-   If a single strategist pass proves inconsistent on the target local model,
+   If a single reflection proves inconsistent on the target local model,
    run the analysis N times and reconcile, or add a critic pass ("does this
    contradict a prior decision? is each change evidence-backed?") before the
    thesis is committed. Ship the single structured pass first; add this only if
@@ -141,16 +152,17 @@ keep the *core* lean:
 
 ```text
 strix/tools/audit_state/__init__.py
-strix/tools/audit_state/tools.py          # get/update_audit_state, hydrate, pure helpers, qa_audit_summary
-strix/skills/reconnaissance/audit_strategy.md   # the strategist skill (filename stem = audit_strategy)
+strix/tools/audit_state/tools.py    # get/update_audit_state, hydrate, pure helpers, qa_audit_summary
+strix/core/reflection.py            # build_reflection_input, apply_reflection, run_reflection (Feature 2)
 tests/test_audit_state.py
-tests/test_strategist_loop.py
+tests/test_reflection_loop.py
 ```
 
-No new tool module for Feature 2: it is the `audit_strategy` skill + a rule
-added to the existing `strix/tools/qa_loop/rules.py` + the wiring in
-`_build_review_context`. The strategist is spawned via the existing
-`create_agent`.
+Feature 2 adds the `reflection.py` code path + an `on_agent_end` handler in
+`strix/core/hooks.py` + a rule in `strix/tools/qa_loop/rules.py` + the
+`qa_audit_summary` wiring in `_build_review_context`. **No new tool, no new
+agent, no `skills/` file** — the reflection is code, not an agent, so there is
+nothing to spawn and no skill to load.
 
 ## Exact wiring anchors
 
@@ -168,18 +180,15 @@ from strix.tools.audit_state.tools import (   # NEW
 )
 ```
 
-`get_audit_state` / `update_audit_state` go in `_BASE_TOOLS` (~333–366) — every
-agent reads the thesis; the strategist writes it. `select_tools` needs **no
-change** — no new root-only tool in v1 (the strategist is spawned via the
-existing `create_agent`).
+`get_audit_state` / `update_audit_state` go in `_BASE_TOOLS` (~333–366).
+`select_tools` needs **no change** — no new root-only tool.
 
-> **Scope note.** `get_audit_state` on every agent is the point (children must
-> read the thesis before new surface). `update_audit_state` on every agent is
-> acceptable but the *intended* writer is the strategist; keep its docstring
-> explicit ("normally only the strategist writes this"). Do not add a separate
-> role/toolset mechanism in v1 — prompt-scoping via the `audit_strategy` skill
-> is enough (see non-goals). Base-tool cost: +2 tools (`get_audit_state`,
-> `update_audit_state`); keep both docstrings terse.
+> **Scope note.** The reflection code path writes `audit_state` via the pure
+> store helpers directly (not via the tool). The `update_audit_state` **tool** is
+> for agents: mainly the **root** marking leads `done`/`dropped` (and optionally
+> a manual thesis touch-up) so the finish gate can clear. `get_audit_state` on
+> every agent is the point — children read the thesis before new surface. Base-tool
+> cost: +2 tools; keep both docstrings terse.
 
 ### 2. State hydration — `strix/core/runner.py`
 
@@ -194,19 +203,28 @@ from strix.tools.audit_state.tools import hydrate_audit_state_from_disk   # NEW 
 hydrate_audit_state_from_disk(state_dir)                                   # NEW
 ```
 
-### 3. Strategist spawn — reuse existing child machinery
+### 3. Reflection trigger + model call
 
-- `create_agent(ctx, name, task, inherit_context, skills)`
-  (`agents_graph/tools.py` ~432) — the spawn path; `skills=["audit_strategy"]`.
-- `spawn_child_agent` / `start_child_agent` (wired in `runner.py` ~220–240) —
-  the machinery `create_agent` routes through; the root's `create_agent` call
-  launches the strategist through it. No direct use needed by this feature.
-- `send_message_to_agent` / `wait_for_message` (`agents_graph/tools.py` ~124 /
-  ~288) — messaging a long-lived strategist (alternative to re-spawn) and
-  root→child interrupts.
-- `build_strix_agent(is_root=False, skills=...)` (`factory.py` ~378) — children
-  get `select_tools(is_root=False)`, i.e. `_BASE_TOOLS + agent_finish`, so the
-  strategist already has every blackboard read tool plus `update_audit_state`.
+- **Trigger — `strix/core/hooks.py`.** `ReportUsageHooks(RunHooks)` already
+  implements `on_llm_end` (~line 39) and is passed to every agent
+  (`spawn_child_agent(..., hooks=hooks)` in `runner.py` ~228–240, and to the root
+  run). Add an `on_agent_end(self, context, agent, output)` method (verified
+  present on `RunHooks`) that, for a **child** end (`context.context["parent_id"]
+  is not None`) and when `coordinator.budget_stopped` is False, schedules
+  `reflection.run_reflection(...)` (single-flight — see 03). `on_agent_end` also
+  fires for the root; skip it (the scan is ending).
+- **Model call — `strix/core/reflection.py`.** Call the run's own model directly
+  via `litellm.acompletion(model=<STRIX_LLM>, messages=..., response_format=...)`.
+  litellm is already a dependency and globally configured in
+  `strix/config/models.py` (`set_default_openai_key`, api_base, litellm defaults),
+  and the model id comes from settings (`STRIX_LLM`, `config/settings.py:23`).
+  Resolve the model id the same way the run does (pass it in from the hook
+  context / config). Record the returned usage into `report_state` (mirror
+  `ReportUsageHooks.on_llm_end`'s `record_sdk_usage`) so reflection tokens count
+  against `--max-budget-usd`.
+- **Blackboard reads** are direct module-dict access (`loot`, `target_profile`,
+  `audit_state`, `notes`) + `evaluate_qa_gaps(...)`; a traffic digest is included
+  only when a Caido client is in the hook context. No tool calls, no agent.
 
 ### 4. QA-gate integration — `strix/tools/qa_loop/`
 
@@ -230,17 +248,18 @@ hydrate_audit_state_from_disk(state_dir)                                   # NEW
 is delivered by the `strix/skills/coordination/root_agent.md` skill, which
 `prompt.py` (~45–46) auto-appends for the root agent only. So:
 
-- **Root-only convention → `strix/skills/coordination/root_agent.md`** (extend
-  its existing "Pre-finish QA review" section — the exact analog): after a child
-  completes (a `wait_for_message` returns its report), spawn
-  `create_agent(name="Audit Strategist", skills=["audit_strategy"])`, wait for
-  it, then read `get_audit_state` before dispatching new work (see 03 for exact
-  wording). **Do not** try to add an `{% if is_root %}` block to the jinja — the
-  template isn't given `is_root`.
+- **Root line → `strix/skills/coordination/root_agent.md`** (extend its existing
+  "Pre-finish QA review" section — the exact analog): the audit thesis is
+  refreshed **automatically** after each specialist finishes; read
+  `get_audit_state`, act on its high-priority leads (spawn/interrupt as needed),
+  and mark leads `done`/`dropped` via `update_audit_state` as you resolve them so
+  the finish gate can clear (see 03 for exact wording). **No manual spawn** — the
+  root does not launch a strategist. **Do not** add an `{% if is_root %}` block to
+  the jinja — the template isn't given `is_root`.
 - **Shared line → `system_prompt.jinja`** (`EFFICIENCY TACTICS` or
   `<environment>`): "read `get_audit_state` before starting a new surface and
-  align to its current leads." (This region genuinely exists and applies to all
-  agents.)
+  align to its current high-priority leads." (This region genuinely exists and
+  applies to all agents.)
 
 ### 6. Lint config — `pyproject.toml`
 
@@ -263,7 +282,7 @@ write; **no** raw secrets, so no `0o600` requirement).
   `loot_id` (e.g. a lead "reuse credential `ab12cd` against /admin"), never by
   value. If a hint is unavoidable, use `loot.mask_value`.
 - **Write-time scrub backstop (cheap defense-in-depth).** "ids only" is a
-  strategist-skill convention; the store cannot know a string is a secret. So
+  reflection-prompt convention; the store cannot know a string is a secret. So
   `update_audit_state` runs `scrub_secrets(...)` over its free-text fields
   (`thesis`, `assumption`, `lead`, `reason`) at write time — one call per field,
   the same helper `qa_*_summary` uses at read time. It silently degrades a
@@ -277,12 +296,15 @@ write; **no** raw secrets, so no `0o600` requirement).
   `refs`. Free text goes only into the in-memory, never-persisted `signals`
   list. Do not put lead/assumption `text` into `refs`.
 - **Same bundle/transcript caveat as `target_profiles.json`.** `audit_state.json`
-  lands in `.state/` and rides along in any debug bundle; the strategist's task
-  args and `update_audit_state` args land in the run transcript
-  (`run.json`/`agents.db`/`strix.log`). Because we forbid raw values in
-  `audit_state`, this is derived-intel exposure, not secret exposure — but any
-  bundle/export step must still treat `.state/` and the transcript as in scope
-  (consistent with Tool Awareness 01/03).
+  lands in `.state/` and rides along in any debug bundle; `update_audit_state`
+  args (from the root/children) land in the run transcript
+  (`run.json`/`agents.db`/`strix.log`). The reflection's own model call is direct
+  litellm (not an SDK tool call), so its prompt/response are **not** in the tool
+  transcript — but its inputs are the same blackboard, and the write-time scrub
+  applies. Because we forbid raw values in `audit_state`, this is derived-intel
+  exposure, not secret exposure — but any bundle/export step must still treat
+  `.state/` and the transcript as in scope (consistent with Tool Awareness
+  01/03).
 - **`qa_audit_summary`** feeds the QA gate: return bounded, `scrub_secrets`-clean
   `refs`/leads and in-memory `signals` only — never raw values (there should be
   none to leak, but scrub defensively, exactly like `qa_loot_summary`).
@@ -300,8 +322,13 @@ write; **no** raw secrets, so no `0o600` requirement).
   seed the store via the `_impl` after `hydrate_audit_state_from_disk(tmp_path)`).
   Seed an open high lead, call `_build_review_context` / `evaluate_qa_gaps`,
   assert the blocking gap.
-- **The strategist LLM loop is NOT unit-tested** (it needs a live model). Its
-  *contract* is tested at the seams: the `audit_strategy` skill resolves via
-  `load_skills`, the root convention is present in `root_agent.md`,
-  `select_tools(is_root=True)` gains no new tool, and the store/gate behave. Live
-  behaviour is manual-smoke only (see 04).
+- **The reflection is far more unit-testable than a strategist agent would be**
+  (a key win of the code-path vehicle): `build_reflection_input` (pure — snapshot
+  → messages) and `apply_reflection` (pure — delta → audit_state, ignores
+  malformed) are tested directly with plain dicts; `run_reflection` is tested with
+  a **mocked litellm** (assert: tolerant parse + one retry + clean skip on
+  failure; usage recorded; skip when `budget_stopped`). The `on_agent_end`
+  trigger + single-flight coalescing are tested with a fake coordinator/hook (a
+  child end triggers; a root end does not; a burst runs at most one extra). **No
+  live model needed for any of this.** Only the end-to-end "model actually revises
+  the thesis and the root re-steers" is manual smoke (see 04).

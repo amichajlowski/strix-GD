@@ -8,17 +8,19 @@ Caido.
 ## v1 scope — build exactly these (nothing more)
 
 New files: `strix/tools/audit_state/__init__.py`, `strix/tools/audit_state/tools.py`,
-`strix/skills/reconnaissance/audit_strategy.md`, `tests/test_audit_state.py`,
-`tests/test_strategist_loop.py`.
+`strix/core/reflection.py`, `tests/test_audit_state.py`,
+`tests/test_reflection_loop.py`.
 Edits: `strix/agents/factory.py` (imports + `_BASE_TOOLS`, **not** `select_tools`),
-`strix/core/runner.py` (hydrate), `strix/tools/qa_loop/rules.py` (lead-gap rule),
+`strix/core/runner.py` (hydrate), `strix/core/hooks.py` (`on_agent_end` trigger),
+`strix/tools/qa_loop/rules.py` (lead-gap rule),
 `strix/tools/qa_loop/tool.py` (`qa_audit_summary` wiring),
-`strix/skills/coordination/root_agent.md` (root convention),
-`strix/agents/prompts/system_prompt.jinja` (shared line),
-`strix/skills/README.md` (skill ref), `pyproject.toml` (per-file-ignore).
+`strix/skills/coordination/root_agent.md` (root line: auto-refresh + act on
+leads), `strix/agents/prompts/system_prompt.jinja` (shared line),
+`pyproject.toml` (per-file-ignore for the audit_state tool module).
 Do **not** build: any new tool beyond `get_audit_state`/`update_audit_state`, a
-`review_findings` tool, an execution-loop trigger, or a self-consistency/critic
-pass (all phase-2 — see 01).
+strategist child agent / `audit_strategy` skill, a `review_findings` tool, an
+execution-loop trigger, or a self-consistency/critic pass (all phase-2 or
+rejected — see 01/05 §0.1).
 
 ## Implementation constraints
 
@@ -65,28 +67,41 @@ line (read `get_audit_state` before new surface); add the per-file-ignore in
 
 ---
 
-## Phase 2 — Strategist reflection loop
+## Phase 2 — Reflection loop (code path)
 
-### Task 2.1 — Skill
-Create `strix/skills/reconnaissance/audit_strategy.md` (filename stem
-`audit_strategy`, valid frontmatter) with the reflection procedure from
-[03-strategist-loop.md](03-strategist-loop.md). Reference it from
-`strix/skills/README.md`.
+### Task 2.1 — Reflection module
+Create `strix/core/reflection.py` with the pure `build_reflection_input(snapshot)`
+and `apply_reflection(result)` and the impure `run_reflection(*, model,
+caido_client)` per [03-strategist-loop.md](03-strategist-loop.md). `run_reflection`
+snapshots the blackboard (loot/target_profile/audit_state/notes module dicts +
+`evaluate_qa_gaps` + optional traffic digest), calls `litellm.acompletion` on the
+run's model with structured output, parses tolerantly (retry once, else skip),
+applies via the Feature-1 pure helpers, and records usage into `report_state`.
+Single-flight (`asyncio.Lock` + `dirty` flag). Keep the reflection prompt as a
+module constant. **No agent, no tools, no `skills/` file.**
 
-### Task 2.2 — QA-gate rule + wiring
+### Task 2.2 — Deterministic trigger
+Add `on_agent_end` to `strix/core/hooks.py` (`ReportUsageHooks` or a sibling
+`RunHooks`) that schedules `run_reflection` for a **child** end
+(`parent_id is not None`), skips the root end and `budget_stopped`, and runs
+non-blocking (`create_task`). Resolve the model id from settings (`STRIX_LLM`);
+pass `caido_client` from the hook context if present.
+
+### Task 2.3 — QA-gate rule + wiring
 Add the open-high-lead → finish-blocking-gap rule to
-`qa_loop/rules.py::evaluate_qa_gaps` (the lead text must flow through the
-existing `_scrub_gap`/`_scrub_text` path — do not hand-format an unscrubbed
-`reason`). Wire `qa_audit_summary()` into `qa_loop/tool.py::_build_review_context`
-(extend `signal_text`, carry `_audit_leads` — **ids/enums only**), mirroring the
-existing `qa_loot_summary` wiring.
+`qa_loop/rules.py::evaluate_qa_gaps` (lead text must flow through the existing
+`_scrub_gap`/`_scrub_text` path — do not hand-format an unscrubbed `reason`;
+deferrable via `acknowledged_gaps`). Wire `qa_audit_summary()` into
+`qa_loop/tool.py::_build_review_context` (extend `signal_text`, carry
+`_audit_leads` — **ids/enums only**), mirroring the `qa_loot_summary` wiring.
 
-### Task 2.3 — Prompt convention (two files, mind the anchor)
-Add the spawn-strategist-after-`wait_for_message` convention to
+### Task 2.4 — Prompt lines (two files, mind the anchor)
+Add the **root line** (thesis auto-refreshes after each specialist; read
+`get_audit_state`, act on high-priority leads, mark leads `done`/`dropped`) to
 `strix/skills/coordination/root_agent.md` (NOT `system_prompt.jinja` — it has no
-`is_root` conditional; root guidance is auto-appended from that skill). Add the
-**shared** read-`get_audit_state`-before-new-surface line to
-`system_prompt.jinja`. No new tool; `select_tools` unchanged.
+`is_root` conditional). Add the **shared** read-`get_audit_state`-before-new-
+surface line to `system_prompt.jinja`. No new tool; `select_tools` unchanged; no
+spawn convention.
 
 **Acceptance:** see [03-strategist-loop.md](03-strategist-loop.md#acceptance-criteria).
 
@@ -130,44 +145,66 @@ Prefer pure/mocked tests. Use `XXXX` for all placeholders.
     `refs=["ab12cd"]` keeps the id; `qa_audit_summary` exposes no value field
     (guards the ids-only secret convention).
 
-### `tests/test_strategist_loop.py`
+### `tests/test_reflection_loop.py`
 
-14. `test_audit_strategy_skill_loads` — `load_skills(["audit_strategy"])`
-    returns non-empty content (resolves by filename stem).
-15. `test_qa_gap_for_open_high_lead` — seed an open `priority=high` lead in the
-    store, build a minimal `review_context`, `evaluate_qa_gaps` → a
-    finish-blocking gap naming the lead.
-16. `test_no_qa_gap_when_lead_done_or_dropped` — same lead set `done` (and
-    `dropped`) → no blocking gap.
-17. `test_no_gap_for_medium_or_low_lead` — open `medium`/`low` leads do not
-    block finishing.
-18. `test_qa_loop_surfaces_audit_signals` — seed the store (call the `_impl`
-    after `hydrate_audit_state_from_disk(tmp_path)`), monkeypatch
-    `qa_loop.tool._collect_proxy` → `([], False)` (no Caido), call
-    `_build_review_context(...)` **synchronously (it is a sync def — no
-    `await`)**, assert an audit signal appears in `signal_text` and `_audit_leads`
-    is carried. Offline — mirrors
-    `tests/test_loot_store.py::test_qa_loop_surfaces_loot_signals`.
-19. `test_lead_gap_reason_is_scrubbed` — an open high lead whose `text` contains a
+All offline. The model is **mocked** (monkeypatch `litellm.acompletion` /
+`reflection`'s call site) — no live LLM/Docker/Caido.
+
+14. `test_build_reflection_input_is_pure` — given a snapshot (prior thesis, loot
+    refs by id, target profile, current QA gaps), returns chat messages that
+    include the prior thesis and lead ids and **no raw values**; deterministic,
+    no I/O.
+15. `test_apply_reflection_applies_delta` — a well-formed structured result
+    (thesis + a supersede + a new lead + a lead status update) is applied to
+    `audit_state` correctly (supersede links both ways; lead added; status
+    changed).
+16. `test_apply_reflection_ignores_malformed_items` — a result with a bad enum /
+    missing field / unknown supersede id applies the valid items and drops the
+    bad ones **without raising**.
+17. `test_run_reflection_tolerates_bad_json_then_skips` — mocked model returns
+    non-JSON twice → `run_reflection` retries once, then skips (audit_state
+    unchanged), returns cleanly, does not raise.
+18. `test_run_reflection_skips_when_budget_stopped` — `coordinator.budget_stopped`
+    True → no model call, no change.
+19. `test_run_reflection_records_usage` — on a successful mocked call, usage from
+    the litellm response is recorded to `report_state` (budget accounting).
+20. `test_on_agent_end_triggers_for_child_not_root` — a child end
+    (`parent_id` set) schedules a reflection; a root end (`parent_id is None`)
+    does not (assert via a monkeypatched `run_reflection` counter; fake context).
+21. `test_reflection_single_flight_coalesces` — two near-simultaneous child ends
+    while a reflection is "running" result in at most one extra run (drive the
+    lock/`dirty` logic with a controllable fake).
+22. `test_qa_gap_for_open_high_lead` — seed an open `priority=high` lead,
+    `evaluate_qa_gaps` → a finish-blocking gap naming the lead.
+23. `test_no_qa_gap_when_lead_done_dropped_or_lower` — `done`/`dropped`/`medium`/
+    `low` → no blocking gap.
+24. `test_lead_gap_can_be_acknowledged` — acknowledging the lead-gap's `gap_id`
+    (via `assemble_review(acknowledged_gaps=[...])`) removes it from the blocking
+    set (livelock escape hatch).
+25. `test_lead_gap_reason_is_scrubbed` — an open high lead whose `text` contains a
     scrub-matched token yields a gap whose persisted `reason`/`suggested_action`
     is redacted (guards the `_scrub_gap` routing).
-20. `test_base_tools_include_audit_state_tools` — `get_audit_state`,
+26. `test_qa_loop_surfaces_audit_signals` — seed the store (call the `_impl`
+    after `hydrate_audit_state_from_disk(tmp_path)`), monkeypatch
+    `qa_loop.tool._collect_proxy` → `([], False)`, call `_build_review_context`
+    **synchronously (sync def — no `await`)**, assert an audit signal in
+    `signal_text` and `_audit_leads` carried (ids/enums only). Mirrors
+    `tests/test_loot_store.py::test_qa_loop_surfaces_loot_signals`.
+27. `test_base_tools_include_audit_state_tools` — `get_audit_state`,
     `update_audit_state` present in `_BASE_TOOLS` by tool name.
-21. `test_select_tools_adds_no_new_root_tool` — `select_tools(is_root=True)`
+28. `test_select_tools_adds_no_new_root_tool` — `select_tools(is_root=True)`
     contains exactly the pre-existing root extras (`review_before_finish`,
-    `finish_scan`) plus base — guards against accidentally adding a bespoke
-    reflection tool in v1.
-22. `test_root_agent_skill_mentions_audit_strategy` — `root_agent.md` contains
-    "audit_strategy"/"Audit Strategist" (mirrors
-    `test_finish_scan_guards.py::test_root_agent_skill_mentions_review_before_finish`);
-    guards the corrected root-convention anchor.
+    `finish_scan`) plus base — guards against accidentally adding a bespoke tool.
+29. `test_root_agent_skill_mentions_audit_state` — `root_agent.md` mentions
+    `get_audit_state` / the auto-refresh convention (mirrors
+    `test_finish_scan_guards.py::test_root_agent_skill_mentions_review_before_finish`).
 
 ---
 
 ## Manual verification (not part of automated DoD)
 
 ```bash
-uv run pytest tests/test_audit_state.py tests/test_strategist_loop.py
+uv run pytest tests/test_audit_state.py tests/test_reflection_loop.py
 uv run pytest
 make lint
 make type-check
@@ -179,8 +216,10 @@ Smoke test (authorised target only; identifiers as `XXXX`):
 uv run strix -n --target https://XXXX.example --scan-mode deep --max-budget-usd 1
 ```
 
-Expected: after a child specialist finishes, the root spawns an Audit
-Strategist; `audit_state.json` appears in the state dir with a thesis + leads;
-superseded assumptions carry a reason; the finish gate blocks while an open
-high-priority lead remains; `audit_state.json` and the thesis survive a resume.
-Confirm no raw secret values appear in `audit_state.json` (ids only).
+Expected: after a child specialist finishes, a reflection runs automatically
+(no manual spawn) and `audit_state.json` appears in the state dir with a thesis +
+leads; superseded assumptions carry a reason; the finish gate blocks while an
+open high-priority lead remains (until pursued or acknowledged); reflection
+tokens show up in the usage/budget totals; `audit_state.json` and the thesis
+survive a resume. Confirm no raw secret values appear in `audit_state.json` (ids
+only).
