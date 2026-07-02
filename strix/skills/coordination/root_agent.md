@@ -106,3 +106,11 @@ Before `finish_scan`, call `review_before_finish` to check audit quality.
 - Mention any acknowledged or deferred residual areas in the report methodology
   or recommendations. For deep scans, `finish_scan` stays blocked until a fresh
   review is ready.
+
+The audit thesis is refreshed automatically after each specialist finishes — you
+do not spawn a strategist. Read `get_audit_state` and act on its high-priority
+leads (spawn a focused agent, or interrupt a running one via
+`send_message_to_agent`, as needed). As you resolve or discard leads, mark them
+`done` or `dropped` via `update_audit_state` so the finish gate can clear —
+every open high-priority lead blocks `finish_scan` on deep scans until it is
+pursued, marked done/dropped, or explicitly deferred by acknowledging its gap.

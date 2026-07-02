@@ -19,6 +19,7 @@ from strix.core.agents import coordinator_from_context
 from strix.core.scrubbing import scrub_secrets
 from strix.core.tool_history import summarise_agent_tool_history
 from strix.report.state import get_global_report_state
+from strix.tools.audit_state.tools import _snapshot_audit_state, qa_audit_summary
 from strix.tools.loot.tools import qa_loot_summary
 from strix.tools.notes.tools import qa_notes_summary
 from strix.tools.proxy import caido_api
@@ -116,10 +117,25 @@ def _build_review_context(
 
     notes = qa_notes_summary()
     loot = qa_loot_summary()
+    audit = qa_audit_summary()
     signal_text: list[str] = list(notes["signals"])
     signal_text.extend(loot["signals"])
+    signal_text.extend(audit["signals"])
     signal_text.extend(str(v.get("title", "")).lower() for v in report_state.vulnerability_reports)
     signal_text.extend(p.lower() for p in proxy_paths)
+
+    # Scrubbed, bounded lead text for OPEN leads only, keyed by lead_id. This is
+    # IN-MEMORY ONLY (never copied into the persisted review): the ids-only
+    # ``_audit_leads`` refs are persisted; free text flows only to the lead-gap
+    # reason, which ``_scrub_gap`` scrubs again on persist. Null-safe on empty.
+    audit_lead_texts: dict[str, str] = {}
+    audit_doc = _snapshot_audit_state()
+    for entry in as_dict(audit_doc.get("leads")).values():
+        if not isinstance(entry, dict) or entry.get("status") != "open":
+            continue
+        lead_id = entry.get("lead_id")
+        if isinstance(lead_id, str) and lead_id:
+            audit_lead_texts[lead_id] = _scrub_text(entry.get("text", ""))
 
     return {
         "target_types": target_types,
@@ -130,6 +146,8 @@ def _build_review_context(
         "signal_text": signal_text,
         "_note_refs": notes["refs"],
         "_loot_refs": loot["refs"],
+        "_audit_leads": audit["refs"],
+        "_audit_lead_texts": audit_lead_texts,
     }
 
 
@@ -225,6 +243,7 @@ async def _run_review(
         "diagnostics": diagnostics,
         "note_refs": review_context["_note_refs"],
         "loot_refs": review_context["_loot_refs"],
+        "audit_leads": review_context["_audit_leads"],
     }
     report_state.record_qa_review(review)
     return review

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import TYPE_CHECKING, Any
 
 from agents.lifecycle import RunHooks
 
+from strix.core import reflection
 from strix.report.state import get_global_report_state
 
 
@@ -27,8 +29,6 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
     """Persist SDK-native usage after every model response."""
 
     def __init__(self, *, model: str, max_budget_usd: float | None = None) -> None:
-        import math
-
         if max_budget_usd is not None and (
             not math.isfinite(max_budget_usd) or max_budget_usd <= 0
         ):
@@ -70,3 +70,35 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
                 raise BudgetExceededError(
                     f"Token budget of ${self._max_budget_usd:.2f} exceeded (spent ${cost:.4f})"
                 )
+
+    async def on_agent_end(
+        self,
+        context: RunContextWrapper[dict[str, Any]],
+        agent: Agent[dict[str, Any]],  # noqa: ARG002 — RunHooks signature
+        output: Any,  # noqa: ARG002 — RunHooks signature
+    ) -> None:
+        """Fire the adaptive-audit reflection when a specialist CHILD finishes.
+
+        Runs on the agent-teardown path, so it MUST never raise into the caller
+        (R5) — the whole body is wrapped. Only child ends trigger it (a root end
+        means the scan is over); budget-stopped / shutting-down runs skip. The
+        reflection is scheduled as an exception-isolated background task so the
+        completing child's teardown is never blocked.
+        """
+        try:
+            ctx = context.context if isinstance(context.context, dict) else {}
+            if ctx.get("agent_id") is None or ctx.get("parent_id") is None:
+                return  # root end = scan over; don't reflect
+            coordinator = ctx.get("coordinator")
+            if coordinator is not None and (
+                getattr(coordinator, "budget_stopped", False)
+                or getattr(coordinator, "is_shutting_down", False)
+            ):
+                return  # respect budget stop / shutdown
+            reflection._schedule_reflection(
+                model=self._model,
+                caido_client=ctx.get("caido_client"),
+                coordinator=coordinator,
+            )
+        except Exception:  # a reflection bug must not crash an agent
+            logger.exception("on_agent_end reflection scheduling failed")

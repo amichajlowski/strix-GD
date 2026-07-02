@@ -359,6 +359,42 @@ def _diagnostic_gaps(ctx: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _audit_lead_rules(ctx: dict[str, Any]) -> list[dict[str, Any]]:
+    """Emit a HIGH finish-blocking gap for each open, high-priority audit lead.
+
+    First QA rule with a dynamic ``reason`` field: it interpolates the lead's
+    (already-scrubbed) text sourced from ``_audit_lead_texts``; the review path
+    scrubs the gap again via ``_scrub_gap`` before persistence. The lead refs
+    (``_audit_leads``) carry ids/enums only. ``gap_id`` is deterministic
+    (``audit_lead:{lead_id}``) so the root can defer via ``acknowledged_gaps``.
+
+    Null-safe on empty/missing keys (R1): missing ``_audit_leads`` -> no gap.
+    """
+    leads = as_list(ctx.get("_audit_leads"))
+    lead_texts = as_dict(ctx.get("_audit_lead_texts"))
+    gaps: list[dict[str, Any]] = []
+    for raw_lead in leads:
+        lead = as_dict(raw_lead)
+        if lead.get("status") != "open" or lead.get("priority") != "high":
+            continue
+        lead_id = str(lead.get("lead_id") or "")
+        if not lead_id:
+            continue
+        text = str(lead_texts.get(lead_id, "") or "")
+        gaps.append(
+            make_gap(
+                rule_key="audit_lead",
+                area_key=lead_id,
+                priority="high",
+                area="High-priority audit lead",
+                reason=f"Pursue or explicitly defer high-priority lead: {text}",
+                suggested_action=f"Pursue or explicitly defer high-priority lead: {text}",
+                evidence=[f"audit_lead:{lead_id}"],
+            )
+        )
+    return gaps
+
+
 def evaluate_qa_gaps(review_context: dict[str, Any]) -> list[dict[str, Any]]:
     """Evaluate all QA rules and return gaps sorted by priority (critical→low)."""
     th: list[dict[str, Any]] = review_context.get("tool_history") or []
@@ -373,6 +409,9 @@ def evaluate_qa_gaps(review_context: dict[str, Any]) -> list[dict[str, Any]]:
     # when overall availability is borderline.
     gaps.extend(_tool_option_rules(review_context, th))
     gaps.extend(_diagnostic_gaps(review_context))
+    # Lead-gaps depend only on audit_state (not tool history) and run
+    # unconditionally; null-safe on empty/missing keys (R1).
+    gaps.extend(_audit_lead_rules(review_context))
 
     gaps.sort(key=lambda g: _PRIORITY_RANK.get(g.get("priority", "low"), 99))
     return gaps
