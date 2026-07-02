@@ -24,6 +24,10 @@ from strix.tools.agents_graph.tools import (
     view_agent_graph,
     wait_for_message,
 )
+from strix.tools.audit_state.tools import (
+    get_audit_state,
+    update_audit_state,
+)
 from strix.tools.finish.tool import finish_scan
 from strix.tools.load_skill.tool import load_skill
 from strix.tools.loot.tools import (
@@ -358,6 +362,8 @@ _BASE_TOOLS: tuple[Tool, ...] = (
     delete_loot,
     set_target_profile,
     get_target_profile,
+    get_audit_state,
+    update_audit_state,
     view_agent_graph,
     send_message_to_agent,
     wait_for_message,

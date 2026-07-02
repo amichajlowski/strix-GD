@@ -164,6 +164,8 @@ EFFICIENCY TACTICS:
 - Record every reusable artifact (credential, token, cookie, secret, internal
   host, endpoint, id) with `record_loot`, and check `get_loot` before testing
   new surface — reuse is how findings chain into high-impact exploits.
+- Read `get_audit_state` before starting a new surface and align your work to its
+  current high-priority leads and the shared working thesis.
 - Automate with Python scripts for complex workflows and repetitive inputs/tasks
 - Batch similar operations together
 - Use captured traffic from the proxy tools directly, or import `caido_api`

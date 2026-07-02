@@ -198,6 +198,7 @@ ignore = [
 # Lazy imports inside functions to avoid circular dependency with
 # strix.telemetry / strix.report.dedupe / cvss.
 "strix/tools/notes/tools.py" = ["PLC0415", "TC002"]
+"strix/tools/audit_state/tools.py" = ["PLC0415", "TC002"]
 "strix/tools/loot/tools.py" = ["PLC0415", "TC002"]
 "strix/tools/target_profile/tools.py" = ["PLC0415", "TC002"]
 "strix/tools/finish/tool.py" = ["PLC0415", "TC002"]
