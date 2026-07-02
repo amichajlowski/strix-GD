@@ -161,6 +161,15 @@ def test_set_target_profile_merges_without_clobbering() -> None:
     assert len(sources) == len(set(sources))
 
 
+def test_set_target_profile_drops_invalid_ports() -> None:
+    result = set_target_profile_impl(
+        target="api.XXXX.example",
+        ports=[443, -1, 0, 99999, 8443],
+    )
+    assert result["success"] is True
+    assert _target_profiles["api.XXXX.example"]["ports"] == [443, 8443]
+
+
 def test_set_target_profile_validates_enums() -> None:
     result = set_target_profile_impl(
         target="api.XXXX.example",

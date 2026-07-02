@@ -333,9 +333,12 @@ def _bound_ports(ports: list[int] | None) -> list[int]:
     result: list[int] = []
     for raw in ports or []:
         try:
-            result.append(int(raw))
+            port = int(raw)
         except (TypeError, ValueError):
             continue
+        if not (1 <= port <= 65535):  # drop invalid port facts
+            continue
+        result.append(port)
         if len(result) >= _MAX_PORTS:
             break
     return result
