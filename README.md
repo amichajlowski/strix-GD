@@ -252,6 +252,7 @@ export STRIX_LLM_MAX_RETRIES="5"  # retry transient LLM/API failures
 export STRIX_LLM_RETRY_INITIAL_DELAY="2"  # first retry delay in seconds
 export STRIX_LLM_RETRY_MAX_DELAY="90"  # maximum retry delay in seconds
 export STRIX_LLM_RETRY_MULTIPLIER="2"  # exponential backoff multiplier
+export STRIX_LLM_MAX_CONCURRENCY="0"  # max concurrent LLM requests (root + children + reflection); 0 = unlimited, set for resource-limited/local backends
 ```
 
 > [!NOTE]

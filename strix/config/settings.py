@@ -52,6 +52,12 @@ class LlmSettings(BaseSettings):
     )
     retry_max_delay: float = Field(default=90.0, ge=0, alias="STRIX_LLM_RETRY_MAX_DELAY")
     retry_multiplier: float = Field(default=2.0, gt=0, alias="STRIX_LLM_RETRY_MULTIPLIER")
+    # Cap on concurrent in-flight LLM requests across the whole scan (root + all
+    # children + the QA reflection pass). 0 (or less) = unlimited, i.e. current
+    # behaviour. Set to N to bound a resource-limited backend (e.g. a local model
+    # served from one machine that can only run N generations at once). No ge=/gt=:
+    # any value <= 0 is the "disabled" sentinel handled by _llm_semaphore.
+    max_concurrency: int = Field(default=0, alias="STRIX_LLM_MAX_CONCURRENCY")
 
 
 class RuntimeSettings(BaseSettings):

@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from weakref import WeakKeyDictionary
 
 from agents import set_default_openai_api, set_default_openai_key, set_tracing_disabled
+from agents.models.interface import (
+    Model,  # concrete import — _ConcurrencyLimitedModel subclasses it
+)
 from agents.models.multi_provider import MultiProvider
 from agents.retry import (
     ModelRetryBackoffSettings,
@@ -15,9 +20,59 @@ from agents.retry import (
 
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from agents.models.interface import ModelProvider
 
     from strix.config.settings import Settings
+
+
+# One semaphore per event loop: shared across the runner's StrixProvider and the
+# reflection StrixProvider in a scan; WeakKeyDict so it does not outlive a test's
+# event loop. ponytail: per-loop singleton, keyed by the running loop.
+_llm_semaphores: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    WeakKeyDictionary()
+)
+
+
+def _llm_semaphore(limit: int) -> asyncio.Semaphore | None:
+    """Return the shared per-loop semaphore, or None when uncapped (limit <= 0)."""
+    if limit <= 0:
+        return None
+    loop = asyncio.get_running_loop()
+    sem = _llm_semaphores.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(limit)
+        _llm_semaphores[loop] = sem
+    return sem
+
+
+class _ConcurrencyLimitedModel(Model):
+    """Wrap a Model so each request holds one slot of a shared semaphore."""
+
+    def __init__(self, inner: Model, semaphore: asyncio.Semaphore) -> None:
+        self._inner = inner
+        self._semaphore = semaphore
+
+    async def get_response(self, *args: Any, **kwargs: Any) -> Any:
+        async with self._semaphore:
+            return await self._inner.get_response(*args, **kwargs)
+
+    async def stream_response(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        # Hold the slot for the WHOLE stream: the provider connection stays open
+        # until the last event. Released on normal completion or if the consumer
+        # closes/aborts the generator (async-with __aexit__ runs on aclose).
+        # Acquire happens on the first __anext__, so a stream created but never
+        # iterated takes no slot.
+        async with self._semaphore:
+            async for event in self._inner.stream_response(*args, **kwargs):
+                yield event
+
+    async def close(self) -> None:
+        await self._inner.close()
+
+    def get_retry_advice(self, request: Any) -> Any:
+        return self._inner.get_retry_advice(request)
 
 
 class StrixProvider(MultiProvider):
@@ -42,6 +97,15 @@ class StrixProvider(MultiProvider):
         if prefix == "ollama" and stripped_model_name:
             return self._get_fallback_provider("litellm"), f"ollama_chat/{stripped_model_name}"
         return self._get_fallback_provider("litellm"), original_model_name
+
+    def get_model(self, model_name: str | None) -> Model:
+        model = super().get_model(model_name)
+        from strix.config.loader import load_settings  # local import: avoids import cycle
+
+        semaphore = _llm_semaphore(load_settings().llm.max_concurrency)
+        if semaphore is None:
+            return model
+        return _ConcurrencyLimitedModel(model, semaphore)
 
 
 def _build_model_retry_settings(
