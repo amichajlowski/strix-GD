@@ -39,6 +39,10 @@ Configure Strix using environment variables or a config file.
   Multiplier applied to each retry delay.
 </ParamField>
 
+<ParamField path="STRIX_LLM_MAX_CONCURRENCY" default="0" type="integer">
+  Cap on concurrent in-flight LLM requests across the whole scan (root orchestrator + all child agents + the QA reflection pass). `0` (or less) means unlimited — the default, matching prior behaviour. Set to `N` to bound a resource-limited backend, e.g. a local model (Ollama, llama.cpp, vLLM, LM Studio, a self-hosted gateway) served from one machine that can only run so many generations at once. Typical values: `1` (fully serial — safest for a single local backend), `2`–`4` (limited parallelism), unset/`0` (hosted providers).
+</ParamField>
+
 <ParamField path="STRIX_REASONING_EFFORT" default="high" type="string">
   Control thinking effort for reasoning models. Valid values: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`. Defaults to `medium` for quick scan mode.
 </ParamField>
@@ -124,7 +128,22 @@ strix --target ./app --config /path/to/config.json
     "STRIX_LLM_RETRY_INITIAL_DELAY": "2",
     "STRIX_LLM_RETRY_MAX_DELAY": "90",
     "STRIX_LLM_RETRY_MULTIPLIER": "2",
+    "STRIX_LLM_MAX_CONCURRENCY": "0",
     "STRIX_REASONING_EFFORT": "high"
+  }
+}
+```
+
+<Note>
+  `STRIX_LLM_MAX_CONCURRENCY` values: `"0"` = unlimited (default, hosted providers); `"1"` = fully serial (safest for a single local/self-hosted backend); `"2"`–`"4"` = limited parallelism on a constrained backend.
+</Note>
+
+```json title="Local backend — serialised (max_concurrency 1)"
+{
+  "env": {
+    "STRIX_LLM": "ollama/llama3.1",
+    "LLM_API_BASE": "http://localhost:11434",
+    "STRIX_LLM_MAX_CONCURRENCY": "1"
   }
 }
 ```
@@ -146,5 +165,9 @@ export STRIX_LLM_RETRY_INITIAL_DELAY="3"
 export STRIX_LLM_RETRY_MAX_DELAY="120"
 export STRIX_LLM_RETRY_MULTIPLIER="2"
 export STRIX_SANDBOX_EXECUTION_TIMEOUT="300"
+
+# Optional: cap concurrent LLM requests for a local/resource-limited backend
+# 0 = unlimited (default); 1 = fully serial; 2-4 = limited parallelism
+export STRIX_LLM_MAX_CONCURRENCY="1"
 
 ```
