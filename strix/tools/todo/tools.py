@@ -109,11 +109,15 @@ def _get_agent_todos(agent_id: str) -> dict[str, dict[str, Any]]:
     return _todos_storage.setdefault(agent_id, {})
 
 
+_PRIORITY_SYNONYMS = {"medium": "normal", "med": "normal", "urgent": "critical", "p0": "critical", "p1": "high", "p2": "normal", "p3": "low"}
+
+
 def _normalize_priority(priority: str | None, default: str = "normal") -> str:
+    # ponytail: unknown priority coerces to default, never fails the todo.
+    # Priority is an optional cosmetic sort field; LLMs slip on the exact word.
     candidate = (priority or default or "normal").lower()
-    if candidate not in VALID_PRIORITIES:
-        raise ValueError(f"Invalid priority. Must be one of: {', '.join(VALID_PRIORITIES)}")
-    return candidate
+    candidate = _PRIORITY_SYNONYMS.get(candidate, candidate)
+    return candidate if candidate in VALID_PRIORITIES else (default if default in VALID_PRIORITIES else "normal")
 
 
 def _sorted_todos(agent_id: str) -> list[dict[str, Any]]:
