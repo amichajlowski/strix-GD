@@ -62,3 +62,20 @@ def test_wrap_is_idempotent() -> None:
     second = factory._wrap_arg_coercion(set_target_profile)
     assert first is second
     assert first._strix_arg_coercion is True
+
+
+async def test_hallucinated_note_tool_redirects_instead_of_crashing() -> None:
+    # A weak model calling "note" (not create_note/get_note/...) used to hit an
+    # unregistered tool name and raise ModelBehaviorError, killing the agent.
+    # Registering "note" as a real tool intercepts it with a corrective result.
+    tool = factory._hallucinated_tool_alias("note", ["create_note", "get_note"])
+    assert tool.name == "note"
+    result = await tool.on_invoke_tool(None, '{"title": "x"}')
+    assert "not a tool" in result
+    assert "create_note" in result and "get_note" in result
+
+
+def test_note_and_todo_aliases_registered_in_base_tools() -> None:
+    names = {t.name for t in factory.select_tools(is_root=True)}
+    assert "note" in names
+    assert "todo" in names

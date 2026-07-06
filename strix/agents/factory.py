@@ -122,6 +122,33 @@ def _format_tool_error(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
 
 
+def _hallucinated_tool_alias(bad_name: str, real_names: list[str]) -> FunctionTool:
+    """Catch a weak model calling a shorthand tool name that doesn't exist.
+
+    The SDK resolves tool calls by exact name before they ever reach our
+    ``on_invoke_tool`` wrappers; an unregistered name raises ``ModelBehaviorError``
+    and kills the whole agent (see ``strix/tools/notes/tools.py``'s ``create_note``
+    docstring, which used to say "use ``todo`` instead" instead of the real name
+    ``create_todo`` — exactly the kind of prompt text that primes this mistake).
+    Registering the hallucinated name as a real tool that redirects is cheaper
+    and safer than teaching ``execution.py`` to retry a ``ModelBehaviorError``:
+    nothing in that turn was persisted for the model to learn from on a bare
+    retry, so a corrective tool result is the only thing that actually helps.
+    """
+    suggestion = " or ".join(f"`{n}`" for n in real_names)
+
+    async def invoke(_ctx: Any, _raw_input: str) -> str:
+        return f"`{bad_name}` is not a tool. Use {suggestion} instead."
+
+    return FunctionTool(
+        name=bad_name,
+        description=f"Not a real tool. Use {suggestion} instead.",
+        params_json_schema={"type": "object", "properties": {}, "additionalProperties": True},
+        on_invoke_tool=invoke,
+        strict_json_schema=False,
+    )
+
+
 def _function_tool_with_error_result(tool: FunctionTool) -> FunctionTool:
     invoke_tool = tool.on_invoke_tool
 
@@ -452,6 +479,8 @@ _BASE_TOOLS: tuple[Tool, ...] = (
     wait_for_message,
     create_agent,
     stop_agent,
+    _hallucinated_tool_alias("note", ["create_note", "get_note", "update_note", "delete_note"]),
+    _hallucinated_tool_alias("todo", ["create_todo", "update_todo", "mark_todo_done"]),
 )
 
 
