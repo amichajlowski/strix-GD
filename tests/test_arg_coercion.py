@@ -44,6 +44,19 @@ def test_already_valid_args_passthrough() -> None:
     assert _coerce(set_target_profile, args)["ports"] == [80, 443]
 
 
+def test_null_string_becomes_none_for_nullable_field() -> None:
+    # Qwen emits the JSON null keyword as a string for "not provided".
+    out = _coerce(set_target_profile, {"target": "h", "waf": "null", "auth_model": "None"})
+    assert out["waf"] is None
+    assert out["auth_model"] is None
+
+
+def test_none_lowercase_is_a_valid_value_not_coerced() -> None:
+    # "none" is a documented waf/auth value — must survive.
+    out = _coerce(set_target_profile, {"target": "h", "waf": "none"})
+    assert out["waf"] == "none"
+
+
 def test_wrap_is_idempotent() -> None:
     first = factory._wrap_arg_coercion(set_target_profile)
     second = factory._wrap_arg_coercion(set_target_profile)

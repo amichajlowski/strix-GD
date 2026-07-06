@@ -227,12 +227,15 @@ def _allowed_json_types(prop_schema: dict[str, Any]) -> set[str]:
 
 
 def _coerce_stringified_json_args(schema: dict[str, Any], raw_input: str) -> str:
-    """Decode array/object args a model sent as JSON strings (e.g. ``"[3000]"``).
+    """Normalize args a weak function-calling model mis-serialized.
 
-    Weaker function-calling models sometimes emit ``"ports": "[3000]"`` instead
-    of ``"ports": [3000]``, which fails pydantic list/dict validation. Only fields
-    whose schema accepts array/object (and not string) are coerced, so genuine
-    string values are never touched.
+    Two fixes, both scoped by the field's JSON schema so real values are safe:
+
+    * ``"ports": "[3000]"`` → ``[3000]`` — arrays/objects sent as JSON strings
+      (only fields whose schema accepts array/object and not string).
+    * ``"confidence": "null"`` → ``None`` — the JSON ``null`` keyword emitted as a
+      string to mean "not provided" (only nullable fields; the exact tokens
+      ``null``/``None`` — never ``"none"``, which is a valid waf/auth value).
     """
     props = schema.get("properties")
     if not isinstance(props, dict):
@@ -249,10 +252,14 @@ def _coerce_stringified_json_args(schema: dict[str, Any], raw_input: str) -> str
         if not isinstance(value, str):
             continue
         stripped = value.strip()
-        if not stripped or stripped[0] not in "[{":
-            continue
         prop = props.get(key)
         kinds = _allowed_json_types(prop) if isinstance(prop, dict) else set()
+        if stripped in ("null", "None") and "null" in kinds:
+            args[key] = None
+            changed = True
+            continue
+        if not stripped or stripped[0] not in "[{":
+            continue
         if "string" in kinds or not ({"array", "object"} & kinds):
             continue
         try:
