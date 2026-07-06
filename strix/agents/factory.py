@@ -211,6 +211,82 @@ def _decode_chars_escape(s: str) -> str:
     return _CHARS_ESCAPE_RE.sub(sub, s)
 
 
+def _allowed_json_types(prop_schema: dict[str, Any]) -> set[str]:
+    """Collect the JSON types a property accepts, flattening ``anyOf``/``oneOf``."""
+    types: set[str] = set()
+    t = prop_schema.get("type")
+    if isinstance(t, str):
+        types.add(t)
+    elif isinstance(t, list):
+        types.update(x for x in t if isinstance(x, str))
+    for key in ("anyOf", "oneOf", "allOf"):
+        for sub in prop_schema.get(key, []) or []:
+            if isinstance(sub, dict):
+                types |= _allowed_json_types(sub)
+    return types
+
+
+def _coerce_stringified_json_args(schema: dict[str, Any], raw_input: str) -> str:
+    """Decode array/object args a model sent as JSON strings (e.g. ``"[3000]"``).
+
+    Weaker function-calling models sometimes emit ``"ports": "[3000]"`` instead
+    of ``"ports": [3000]``, which fails pydantic list/dict validation. Only fields
+    whose schema accepts array/object (and not string) are coerced, so genuine
+    string values are never touched.
+    """
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return raw_input
+    try:
+        args = json.loads(raw_input)
+    except (json.JSONDecodeError, TypeError):
+        return raw_input
+    if not isinstance(args, dict):
+        return raw_input
+
+    changed = False
+    for key, value in list(args.items()):
+        if not isinstance(value, str):
+            continue
+        stripped = value.strip()
+        if not stripped or stripped[0] not in "[{":
+            continue
+        prop = props.get(key)
+        kinds = _allowed_json_types(prop) if isinstance(prop, dict) else set()
+        if "string" in kinds or not ({"array", "object"} & kinds):
+            continue
+        try:
+            decoded = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if (isinstance(decoded, list) and "array" in kinds) or (
+            isinstance(decoded, dict) and "object" in kinds
+        ):
+            args[key] = decoded
+            changed = True
+
+    return json.dumps(args) if changed else raw_input
+
+
+def _wrap_arg_coercion(tool: FunctionTool) -> FunctionTool:
+    # _BASE_TOOLS are module singletons reused across every agent spawn; wrap once.
+    if getattr(tool, "_strix_arg_coercion", False):
+        return tool
+    invoke_tool = tool.on_invoke_tool
+    schema = tool.params_json_schema
+
+    async def invoke(ctx: Any, raw_input: str) -> Any:
+        raw_input = _coerce_stringified_json_args(schema, raw_input)
+        try:
+            return await invoke_tool(ctx, raw_input)
+        except ValidationError as exc:
+            return _format_validation_error(tool.name, exc)
+
+    tool.on_invoke_tool = invoke
+    tool._strix_arg_coercion = True  # type: ignore[attr-defined]
+    return tool
+
+
 def _format_validation_error(tool_name: str, exc: ValidationError) -> str:
     parts: list[str] = []
     for err in exc.errors():
@@ -374,9 +450,9 @@ _BASE_TOOLS: tuple[Tool, ...] = (
 
 def select_tools(*, is_root: bool) -> list[Tool]:
     """Root/child tool selection. Only root agents get the QA review + finish gate."""
-    if is_root:
-        return [*_BASE_TOOLS, review_before_finish, finish_scan]
-    return [*_BASE_TOOLS, agent_finish]
+    extra = [review_before_finish, finish_scan] if is_root else [agent_finish]
+    tools: list[Tool] = [*_BASE_TOOLS, *extra]
+    return [_wrap_arg_coercion(t) if isinstance(t, FunctionTool) else t for t in tools]
 
 
 def build_strix_agent(
