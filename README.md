@@ -253,6 +253,11 @@ export STRIX_LLM_RETRY_INITIAL_DELAY="2"  # first retry delay in seconds
 export STRIX_LLM_RETRY_MAX_DELAY="90"  # maximum retry delay in seconds
 export STRIX_LLM_RETRY_MULTIPLIER="2"  # exponential backoff multiplier
 export STRIX_LLM_MAX_CONCURRENCY="0"  # max concurrent LLM requests (root + children + reflection); 0 = unlimited, set for resource-limited/local backends
+export STRIX_LLM_RESERVE_RATIO="0.10"  # fraction of the context window reserved for output + estimate drift (floored at 16384 tokens)
+export STRIX_LLM_BYTES_PER_TOKEN="3.5"  # conservative bytes/token divisor for the dependency-free token estimate; lower = safer margin
+export STRIX_LLM_COMPACTION_TRIGGER_RATIO="0.70"  # compact an agent's session in place once its fill crosses this fraction of the window; 0 disables
+export STRIX_LLM_COMPACTION_KEEP_RECENT="12"  # most-recent history items kept verbatim through a compaction
+export STRIX_LLM_SUMMARIZER_MODEL=""  # model used to summarise compacted turns; empty = reuse the run's model
 ```
 
 > [!NOTE]

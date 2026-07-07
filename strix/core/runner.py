@@ -194,7 +194,14 @@ async def run_strix_scan(
             retry_settings=model_retry_settings_from_config(settings),
         )
         context_filter = (
-            ContextLimitFilter(settings.llm.context_window)
+            ContextLimitFilter(
+                settings.llm.context_window,
+                reserve_ratio=settings.llm.reserve_ratio,
+                bytes_per_token=settings.llm.bytes_per_token,
+                summarizer_model=(settings.llm.summarizer_model or resolved_model),
+                compaction_keep_recent=settings.llm.compaction_keep_recent,
+                compaction_trigger_ratio=settings.llm.compaction_trigger_ratio,
+            )
             if settings.llm.context_window > 0
             else None
         )
@@ -206,7 +213,11 @@ async def run_strix_scan(
             trace_include_sensitive_data=False,
             call_model_input_filter=context_filter,
         )
-        hooks = ReportUsageHooks(model=resolved_model, max_budget_usd=max_budget_usd)
+        hooks = ReportUsageHooks(
+            model=resolved_model,
+            max_budget_usd=max_budget_usd,
+            context_filter=context_filter,
+        )
 
         root_agent = build_strix_agent(
             name="strix",
