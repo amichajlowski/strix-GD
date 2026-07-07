@@ -322,8 +322,8 @@ async def create_note(
     of the run; they live in-memory only and are cleared when the
     process exits.
 
-    For actionable tasks, use ``todo`` instead — notes are for capturing
-    information, todos are for tracking work.
+    For actionable tasks, use ``create_todo`` instead — notes are for
+    capturing information, todos are for tracking work.
 
     Categories:
 

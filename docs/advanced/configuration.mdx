@@ -39,6 +39,30 @@ Configure Strix using environment variables or a config file.
   Multiplier applied to each retry delay.
 </ParamField>
 
+<ParamField path="STRIX_LLM_MAX_CONCURRENCY" default="0" type="integer">
+  Cap on concurrent in-flight LLM requests across the whole scan (root orchestrator + all child agents + the QA reflection pass). `0` (or less) means unlimited — the default, matching prior behaviour. Set to `N` to bound a resource-limited backend, e.g. a local model (Ollama, llama.cpp, vLLM, LM Studio, a self-hosted gateway) served from one machine that can only run so many generations at once. Typical values: `1` (fully serial — safest for a single local backend), `2`–`4` (limited parallelism), unset/`0` (hosted providers).
+</ParamField>
+
+<ParamField path="STRIX_LLM_RESERVE_RATIO" default="0.10" type="float">
+  Fraction of the context window held back below `STRIX_LLM_CONTEXT_WINDOW` for the model's own output plus slack in the token estimate. The effective input budget is `window − max(16384, window × ratio) − system-prompt tokens`, floored at half the window. Raise it if requests still occasionally hit a context-length rejection; lower it to pack more history per turn.
+</ParamField>
+
+<ParamField path="STRIX_LLM_BYTES_PER_TOKEN" default="3.5" type="float">
+  Divisor for the dependency-free token estimate (UTF-8 bytes ÷ this value). Lower assumes more tokens per byte — a safer margin for token-dense content (JSON, JWTs, base64). Only affects the local size estimate used for trimming, never what the provider bills.
+</ParamField>
+
+<ParamField path="STRIX_LLM_COMPACTION_TRIGGER_RATIO" default="0.70" type="float">
+  When an agent's estimated context fill crosses this fraction of the window, its stored session is compacted in place: the oldest turns are summarised into a compact pointer index (findings/notes/loot/lead IDs) plus a short digest, while the task and the most recent turns are kept verbatim. The rewrite is persisted, so growth stays bounded and a resume reloads the compacted history. `0` disables compaction (outbound trimming only).
+</ParamField>
+
+<ParamField path="STRIX_LLM_COMPACTION_KEEP_RECENT" default="12" type="integer">
+  Number of most-recent history items kept verbatim through a compaction. Higher preserves more recent detail at the cost of a larger post-compaction session.
+</ParamField>
+
+<ParamField path="STRIX_LLM_SUMMARIZER_MODEL" default="" type="string">
+  Model used to summarise the compacted span. Empty reuses the run's model. Point it at a cheaper/faster model to reduce compaction overhead; if the call fails, compaction falls back to an index-only memory item.
+</ParamField>
+
 <ParamField path="STRIX_REASONING_EFFORT" default="high" type="string">
   Control thinking effort for reasoning models. Valid values: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`. Defaults to `medium` for quick scan mode.
 </ParamField>
@@ -124,7 +148,22 @@ strix --target ./app --config /path/to/config.json
     "STRIX_LLM_RETRY_INITIAL_DELAY": "2",
     "STRIX_LLM_RETRY_MAX_DELAY": "90",
     "STRIX_LLM_RETRY_MULTIPLIER": "2",
+    "STRIX_LLM_MAX_CONCURRENCY": "0",
     "STRIX_REASONING_EFFORT": "high"
+  }
+}
+```
+
+<Note>
+  `STRIX_LLM_MAX_CONCURRENCY` values: `"0"` = unlimited (default, hosted providers); `"1"` = fully serial (safest for a single local/self-hosted backend); `"2"`–`"4"` = limited parallelism on a constrained backend.
+</Note>
+
+```json title="Local backend — serialised (max_concurrency 1)"
+{
+  "env": {
+    "STRIX_LLM": "ollama/llama3.1",
+    "LLM_API_BASE": "http://localhost:11434",
+    "STRIX_LLM_MAX_CONCURRENCY": "1"
   }
 }
 ```
@@ -146,5 +185,9 @@ export STRIX_LLM_RETRY_INITIAL_DELAY="3"
 export STRIX_LLM_RETRY_MAX_DELAY="120"
 export STRIX_LLM_RETRY_MULTIPLIER="2"
 export STRIX_SANDBOX_EXECUTION_TIMEOUT="300"
+
+# Optional: cap concurrent LLM requests for a local/resource-limited backend
+# 0 = unlimited (default); 1 = fully serial; 2-4 = limited parallelism
+export STRIX_LLM_MAX_CONCURRENCY="1"
 
 ```

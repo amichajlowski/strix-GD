@@ -28,6 +28,22 @@ def _ctx(ctx: RunContextWrapper) -> dict[str, Any]:
     return ctx.context if isinstance(ctx.context, dict) else {}
 
 
+# Cap on a child's narrative summary ingested into the parent's SDK session.
+# Full detail lives in filed vulnerability reports / loot / notes.
+_MAX_INGESTED_SUMMARY_CHARS = 4_000
+
+
+def _clip_ingested_summary(summary: str) -> str:
+    text = summary or ""
+    if len(text) <= _MAX_INGESTED_SUMMARY_CHARS:
+        return text
+    return (
+        text[:_MAX_INGESTED_SUMMARY_CHARS]
+        + "\n\n[…summary clipped to keep the parent context bounded — full findings "
+        "are in the filed vulnerability reports, loot, and notes.]"
+    )
+
+
 def _render_completion_report(
     *,
     agent_name: str,
@@ -56,7 +72,11 @@ def _render_completion_report(
         lines.append(f"Task: {task}")
     lines.append("")
     lines.append("Summary:")
-    lines.append(result_summary or "(none)")
+    # Keep the parent (root orchestrator) context thin: an over-long narrative
+    # recap is clipped before it enters the parent's session. The child's real
+    # evidence is durable elsewhere (filed vulnerability reports, loot, notes),
+    # so only redundant prose is dropped, not findings.
+    lines.append(_clip_ingested_summary(result_summary) or "(none)")
     if findings:
         lines.append("")
         lines.append("Findings:")
@@ -243,8 +263,7 @@ async def _spawn_guard_response(
             "success": False,
             "agent_id": None,
             "error": (
-                "Too many active child agents; wait for current workstreams before "
-                "spawning more"
+                "Too many active child agents; wait for current workstreams before spawning more"
             ),
             "active_child_limit": _MAX_ACTIVE_CHILDREN_PER_PARENT,
             "active_children": active_children,

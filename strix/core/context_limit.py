@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -35,16 +36,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Rough tokens-per-byte estimate, matching the SDK sandbox convention
-# (agents.sandbox.util.token_truncation.APPROX_BYTES_PER_TOKEN). We serialise
-# items to JSON and divide their UTF-8 byte length; JSON keys overcount a little,
-# which errs toward trimming slightly more — safe for a hard cap.
-# ponytail: bytes/4 estimate, swap for a real tokenizer only if it proves too coarse.
-_APPROX_BYTES_PER_TOKEN = 4
+# (agents.sandbox.util.token_truncation.APPROX_BYTES_PER_TOKEN), but biased
+# conservative (more tokens per byte than the SDK's 4) so the estimate errs
+# toward over-counting for token-dense content (JSON, JWTs, base64 loot).
+# ponytail: bytes/N estimate, swap for a real tokenizer only if it proves too coarse.
+_APPROX_BYTES_PER_TOKEN = 3.5
 
-# Headroom kept below the raw window for the model's own output plus the slack in
-# the bytes/4 estimate. ponytail: fixed constant, promote to config only if a
-# deployment needs to tune it.
+# Reserve is the larger of this flat floor and a percentage of the window (see
+# _RESERVE_RATIO), kept below the raw window for the model's own output plus
+# slack in the bytes/N estimate.
 _RESERVE_TOKENS = 16384
+_RESERVE_RATIO = 0.10
+
+# shrink() multiplies this factor; once it would fall below the floor, further
+# shrinking is refused and the caller must escalate (compaction/successor).
+_SHRINK_FLOOR = 0.25
 
 _TRUNCATION_MARKER = "[older context truncated by Strix to fit the model context window]"
 _ITEM_TRUNCATED_MARKER = "\n\n[...truncated by Strix to fit the model context window...]"
@@ -64,14 +70,18 @@ def parse_context_length_from_error(message: str | None) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _est_tokens(items: list[Any]) -> int:
+def _est_tokens(items: list[Any], bytes_per_token: float = _APPROX_BYTES_PER_TOKEN) -> int:
     total_bytes = 0
     for item in items:
         try:
             total_bytes += len(json.dumps(item, ensure_ascii=False, default=str).encode("utf-8"))
         except (TypeError, ValueError):
             total_bytes += len(str(item).encode("utf-8"))
-    return total_bytes // _APPROX_BYTES_PER_TOKEN
+    return int(total_bytes / bytes_per_token)
+
+
+def _est_tokens_text(text: str, bytes_per_token: float = _APPROX_BYTES_PER_TOKEN) -> int:
+    return int(len(text.encode("utf-8")) / bytes_per_token)
 
 
 def _repair_pairs(items: list[Any]) -> list[Any]:
@@ -156,18 +166,22 @@ def _truncate_item_text(item: Any) -> Any:
     return new_item
 
 
-def _largest_item_index(items: list[Any]) -> int | None:
+def _largest_item_index(
+    items: list[Any], bytes_per_token: float = _APPROX_BYTES_PER_TOKEN
+) -> int | None:
     best_index: int | None = None
     best_size = -1
     for index, item in enumerate(items):
-        size = _est_tokens([item])
+        size = _est_tokens([item], bytes_per_token)
         if size > best_size:
             best_size = size
             best_index = index
     return best_index
 
 
-def _enforce_hard_cap(items: list[Any], budget: int) -> list[Any]:
+def _enforce_hard_cap(
+    items: list[Any], budget: int, bytes_per_token: float = _APPROX_BYTES_PER_TOKEN
+) -> list[Any]:
     """Last resort when a single kept item alone exceeds budget: clip its text.
 
     Prevents ever emitting an over-budget payload (which the provider would 400
@@ -175,8 +189,8 @@ def _enforce_hard_cap(items: list[Any], budget: int) -> list[Any]:
     halving converges fast.
     """
     guard = 0
-    while _est_tokens(items) > budget and guard < len(items) + 8:
-        index = _largest_item_index(items)
+    while _est_tokens(items, bytes_per_token) > budget and guard < len(items) + 8:
+        index = _largest_item_index(items, bytes_per_token)
         if index is None:
             break
         items = [*items[:index], _truncate_item_text(items[index]), *items[index + 1 :]]
@@ -184,7 +198,9 @@ def _enforce_hard_cap(items: list[Any], budget: int) -> list[Any]:
     return items
 
 
-def trim_items(items: list[Any], budget: int) -> tuple[list[Any], bool]:
+def trim_items(
+    items: list[Any], budget: int, bytes_per_token: float = _APPROX_BYTES_PER_TOKEN
+) -> tuple[list[Any], bool]:
     """Trim ``items`` to fit ``budget`` tokens. Returns ``(items, changed)``.
 
     Strategy: pin the first item (the agent's task), insert a truncation marker,
@@ -193,21 +209,22 @@ def trim_items(items: list[Any], budget: int) -> tuple[list[Any], bool]:
     """
     if budget <= 0 or not items:
         return items, False
-    if _est_tokens(items) <= budget:
+    if _est_tokens(items, bytes_per_token) <= budget:
         return items, False
 
     head = items[:1]
     marker: list[Any] = [{"role": "user", "content": _TRUNCATION_MARKER}]
-    fixed = _est_tokens(head) + _est_tokens(marker)
+    fixed = _est_tokens(head, bytes_per_token) + _est_tokens(marker, bytes_per_token)
 
     tail: list[Any] = []
     for item in reversed(items[1:]):
-        if fixed + _est_tokens(tail) + _est_tokens([item]) > budget:
+        item_tokens = _est_tokens(tail, bytes_per_token) + _est_tokens([item], bytes_per_token)
+        if fixed + item_tokens > budget:
             break
         tail.insert(0, item)
 
     kept = _repair_pairs([*head, *marker, *tail])
-    kept = _enforce_hard_cap(kept, budget)
+    kept = _enforce_hard_cap(kept, budget, bytes_per_token)
     return kept, True
 
 
@@ -219,9 +236,48 @@ class ContextLimitFilter:
     the single ``RunConfig`` across every agent.
     """
 
-    def __init__(self, configured_window: int) -> None:
+    def __init__(
+        self,
+        configured_window: int,
+        *,
+        reserve_ratio: float = _RESERVE_RATIO,
+        bytes_per_token: float = _APPROX_BYTES_PER_TOKEN,
+        summarizer_model: str | None = None,
+        compaction_keep_recent: int = 0,
+        compaction_trigger_ratio: float = 0.0,
+    ) -> None:
         self._configured_window = configured_window
         self._learned_window: int | None = None
+        self._reserve_ratio = reserve_ratio
+        self._bytes_per_token = bytes_per_token
+        self._shrink_factor = 1.0
+        # Carried here (not imported) so the compaction module can read config +
+        # the live window/estimate off the single shared filter without a cycle:
+        # compaction imports context_limit, never the reverse.
+        self.summarizer_model = summarizer_model
+        self.compaction_keep_recent = compaction_keep_recent
+        self.compaction_trigger_ratio = compaction_trigger_ratio
+
+    @property
+    def bytes_per_token(self) -> float:
+        return self._bytes_per_token
+
+    def effective_window(self) -> int:
+        """The live window (configured, lowered by any learned provider max)."""
+        return self._window()
+
+    def estimate_tokens(self, items: list[Any]) -> int:
+        """Token estimate for ``items`` using this filter's calibrated divisor."""
+        return _est_tokens(items, self._bytes_per_token)
+
+    def reset_shrink(self) -> None:
+        """Clear the transient shrink applied during 400-recovery.
+
+        Called after a successful cycle so a one-off overflow does not
+        permanently penalise this (shared) filter's budget for the rest of the
+        run. Compaction is the durable reducer; shrink is only a last resort.
+        """
+        self._shrink_factor = 1.0
 
     def note_context_length(self, reported_max: int) -> bool:
         """Record the provider's true context limit. Returns True if it lowered
@@ -234,17 +290,39 @@ class ContextLimitFilter:
         logger.info("Context-limit filter learned provider max context = %d tokens", reported_max)
         return True
 
-    def _budget(self) -> int:
+    def shrink(self, factor: float) -> bool:
+        """Multiply the effective budget by ``factor``.
+
+        Unlike :meth:`note_context_length`, this shrinks the budget even when the
+        provider keeps reporting the same max — the recovery path for a model
+        whose real limit is already known but whose token estimate was still too
+        optimistic. Returns ``False`` once a floor is hit so the caller can
+        escalate (compaction/successor) instead of shrinking forever.
+        """
+        candidate = self._shrink_factor * factor
+        if candidate < _SHRINK_FLOOR:
+            return False
+        self._shrink_factor = candidate
+        return True
+
+    def _window(self) -> int:
         window = self._configured_window
         if self._learned_window is not None:
             window = min(window, self._learned_window)
-        # Never let reserve drive the budget to zero on a small window.
-        return max(window // 2, window - _RESERVE_TOKENS)
+        return window
+
+    def _budget(self, instruction_tokens: int = 0) -> int:
+        window = self._window()
+        reserve = max(_RESERVE_TOKENS, math.ceil(window * self._reserve_ratio))
+        # Never let reserve + instructions drive the budget below half the window.
+        base = max(window // 2, window - reserve - instruction_tokens)
+        return int(base * self._shrink_factor)
 
     def __call__(self, data: CallModelData[Any]) -> ModelInputData:
         model_data = data.model_data
-        budget = self._budget()
-        trimmed, changed = trim_items(list(model_data.input), budget)
+        instruction_tokens = _est_tokens_text(model_data.instructions or "", self._bytes_per_token)
+        budget = self._budget(instruction_tokens)
+        trimmed, changed = trim_items(list(model_data.input), budget, self._bytes_per_token)
         if not changed:
             return model_data
         logger.info(

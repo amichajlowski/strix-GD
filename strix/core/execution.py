@@ -15,6 +15,7 @@ from agents.sandbox.errors import ExecTransportError
 from docker import errors as docker_errors  # type: ignore[import-untyped, unused-ignore]
 from openai import APIError
 
+from strix.core.compaction import maybe_compact_session
 from strix.core.context_limit import parse_context_length_from_error
 from strix.core.hooks import BudgetExceededError
 from strix.core.inputs import child_initial_input
@@ -41,6 +42,13 @@ logger = logging.getLogger(__name__)
 StreamEventSink = Callable[[str, Any], None]
 
 _INPUT_REJECTION_CODES = frozenset({400, 404, 422})
+# Raised from 3 (pre-shrink) to allow a couple of shrink attempts after the
+# learned-window path dead-ends (reported max unchanged).
+_MAX_CONTEXT_RELIMITS = 6
+_CONTEXT_SHRINK_FACTOR = 0.85
+# Bound on in-place session compactions per cycle before falling back to
+# learned-window / shrink recovery.
+_MAX_COMPACTIONS = 3
 
 
 async def run_agent_loop(
@@ -355,6 +363,7 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
     image_strips = 0
     tool_call_repairs = 0
     context_relimits = 0
+    compactions = 0
     while True:
         try:
             await coordinator.mark_running(agent_id)
@@ -408,29 +417,61 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
             raise
         except Exception as exc:
             input_rejected = getattr(exc, "status_code", None) in _INPUT_REJECTION_CODES
+            # First recovery for a size rejection: compact the stored session in
+            # place (summarise the oldest turns into a pointer index) and retry.
+            # Unlike trimming/shrinking this is durable — it bounds the persisted
+            # history so a resume reloads the compacted version — and it preserves
+            # the important detail via the state stores rather than dropping it.
+            if compactions < _MAX_COMPACTIONS and session is not None and input_rejected:
+                context_filter = getattr(run_config, "call_model_input_filter", None)
+                try:
+                    compacted = await maybe_compact_session(
+                        session, context_filter=context_filter, coordinator=coordinator
+                    )
+                except Exception:
+                    logger.exception("compaction recovery failed for %s", agent_id)
+                    compacted = False
+                if compacted:
+                    compactions += 1
+                    logger.info(
+                        "Compacted %s session after rejection; retrying (%d)",
+                        agent_id,
+                        compactions,
+                    )
+                    input_data = []
+                    continue
             # A context-length 400 carries the model's true window in its message.
             # Teach it to the shared context-limit filter so the next request is
             # trimmed to fit, then retry rather than killing the agent. This makes
             # the cap self-correcting when the configured window is too high for
             # the model actually serving the request (e.g. a smaller local model).
-            if context_relimits < 3 and input_rejected:
+            # The provider often keeps reporting the *same* max on a second
+            # rejection (the estimate was wrong, not the learned window) — in
+            # that dead end, shrink the effective budget instead of giving up.
+            if context_relimits < _MAX_CONTEXT_RELIMITS and input_rejected:
                 reported_max = parse_context_length_from_error(str(exc))
                 context_filter = getattr(run_config, "call_model_input_filter", None)
-                if (
-                    reported_max is not None
-                    and context_filter is not None
-                    and hasattr(context_filter, "note_context_length")
-                    and context_filter.note_context_length(reported_max)
-                ):
-                    context_relimits += 1
-                    logger.info(
-                        "Lowered context budget for %s to reported max %d; retrying (%d)",
-                        agent_id,
-                        reported_max,
-                        context_relimits,
+                if context_filter is not None:
+                    learned = bool(
+                        reported_max is not None
+                        and hasattr(context_filter, "note_context_length")
+                        and context_filter.note_context_length(reported_max)
                     )
-                    input_data = []
-                    continue
+                    shrunk = bool(
+                        not learned
+                        and hasattr(context_filter, "shrink")
+                        and context_filter.shrink(_CONTEXT_SHRINK_FACTOR)
+                    )
+                    if learned or shrunk:
+                        context_relimits += 1
+                        logger.info(
+                            "Lowered context budget for %s via %s; retrying (%d)",
+                            agent_id,
+                            "learned max" if learned else "shrink",
+                            context_relimits,
+                        )
+                        input_data = []
+                        continue
             if image_strips < 3 and session is not None and input_rejected:
                 try:
                     stripped = await strip_all_images_from_session(session)
@@ -488,6 +529,11 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
             # instruction wake the parked root.
             return None
         else:
+            # A clean cycle: clear any transient shrink so a one-off overflow
+            # does not permanently penalise the shared filter's budget.
+            context_filter = getattr(run_config, "call_model_input_filter", None)
+            if context_filter is not None and hasattr(context_filter, "reset_shrink"):
+                context_filter.reset_shrink()
             await _settle_run_result(coordinator, agent_id, interactive)
             return stream
 

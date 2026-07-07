@@ -122,6 +122,33 @@ def _format_tool_error(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
 
 
+def _hallucinated_tool_alias(bad_name: str, real_names: list[str]) -> FunctionTool:
+    """Catch a weak model calling a shorthand tool name that doesn't exist.
+
+    The SDK resolves tool calls by exact name before they ever reach our
+    ``on_invoke_tool`` wrappers; an unregistered name raises ``ModelBehaviorError``
+    and kills the whole agent (see ``strix/tools/notes/tools.py``'s ``create_note``
+    docstring, which used to say "use ``todo`` instead" instead of the real name
+    ``create_todo`` — exactly the kind of prompt text that primes this mistake).
+    Registering the hallucinated name as a real tool that redirects is cheaper
+    and safer than teaching ``execution.py`` to retry a ``ModelBehaviorError``:
+    nothing in that turn was persisted for the model to learn from on a bare
+    retry, so a corrective tool result is the only thing that actually helps.
+    """
+    suggestion = " or ".join(f"`{n}`" for n in real_names)
+
+    async def invoke(_ctx: Any, _raw_input: str) -> str:
+        return f"`{bad_name}` is not a tool. Use {suggestion} instead."
+
+    return FunctionTool(
+        name=bad_name,
+        description=f"Not a real tool. Use {suggestion} instead.",
+        params_json_schema={"type": "object", "properties": {}, "additionalProperties": True},
+        on_invoke_tool=invoke,
+        strict_json_schema=False,
+    )
+
+
 def _function_tool_with_error_result(tool: FunctionTool) -> FunctionTool:
     invoke_tool = tool.on_invoke_tool
 
@@ -209,6 +236,89 @@ def _decode_chars_escape(s: str) -> str:
         return token
 
     return _CHARS_ESCAPE_RE.sub(sub, s)
+
+
+def _allowed_json_types(prop_schema: dict[str, Any]) -> set[str]:
+    """Collect the JSON types a property accepts, flattening ``anyOf``/``oneOf``."""
+    types: set[str] = set()
+    t = prop_schema.get("type")
+    if isinstance(t, str):
+        types.add(t)
+    elif isinstance(t, list):
+        types.update(x for x in t if isinstance(x, str))
+    for key in ("anyOf", "oneOf", "allOf"):
+        for sub in prop_schema.get(key, []) or []:
+            if isinstance(sub, dict):
+                types |= _allowed_json_types(sub)
+    return types
+
+
+def _coerce_stringified_json_args(schema: dict[str, Any], raw_input: str) -> str:
+    """Normalize args a weak function-calling model mis-serialized.
+
+    Two fixes, both scoped by the field's JSON schema so real values are safe:
+
+    * ``"ports": "[3000]"`` → ``[3000]`` — arrays/objects sent as JSON strings
+      (only fields whose schema accepts array/object and not string).
+    * ``"confidence": "null"`` → ``None`` — the JSON ``null`` keyword emitted as a
+      string to mean "not provided" (only nullable fields; the exact tokens
+      ``null``/``None`` — never ``"none"``, which is a valid waf/auth value).
+    """
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return raw_input
+    try:
+        args = json.loads(raw_input)
+    except (json.JSONDecodeError, TypeError):
+        return raw_input
+    if not isinstance(args, dict):
+        return raw_input
+
+    changed = False
+    for key, value in list(args.items()):
+        if not isinstance(value, str):
+            continue
+        stripped = value.strip()
+        prop = props.get(key)
+        kinds = _allowed_json_types(prop) if isinstance(prop, dict) else set()
+        if stripped in ("null", "None") and "null" in kinds:
+            args[key] = None
+            changed = True
+            continue
+        if not stripped or stripped[0] not in "[{":
+            continue
+        if "string" in kinds or not ({"array", "object"} & kinds):
+            continue
+        try:
+            decoded = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if (isinstance(decoded, list) and "array" in kinds) or (
+            isinstance(decoded, dict) and "object" in kinds
+        ):
+            args[key] = decoded
+            changed = True
+
+    return json.dumps(args) if changed else raw_input
+
+
+def _wrap_arg_coercion(tool: FunctionTool) -> FunctionTool:
+    # _BASE_TOOLS are module singletons reused across every agent spawn; wrap once.
+    if getattr(tool, "_strix_arg_coercion", False):
+        return tool
+    invoke_tool = tool.on_invoke_tool
+    schema = tool.params_json_schema
+
+    async def invoke(ctx: Any, raw_input: str) -> Any:
+        raw_input = _coerce_stringified_json_args(schema, raw_input)
+        try:
+            return await invoke_tool(ctx, raw_input)
+        except ValidationError as exc:
+            return _format_validation_error(tool.name, exc)
+
+    tool.on_invoke_tool = invoke
+    tool._strix_arg_coercion = True  # type: ignore[attr-defined]
+    return tool
 
 
 def _format_validation_error(tool_name: str, exc: ValidationError) -> str:
@@ -369,14 +479,16 @@ _BASE_TOOLS: tuple[Tool, ...] = (
     wait_for_message,
     create_agent,
     stop_agent,
+    _hallucinated_tool_alias("note", ["create_note", "get_note", "update_note", "delete_note"]),
+    _hallucinated_tool_alias("todo", ["create_todo", "update_todo", "mark_todo_done"]),
 )
 
 
 def select_tools(*, is_root: bool) -> list[Tool]:
     """Root/child tool selection. Only root agents get the QA review + finish gate."""
-    if is_root:
-        return [*_BASE_TOOLS, review_before_finish, finish_scan]
-    return [*_BASE_TOOLS, agent_finish]
+    extra = [review_before_finish, finish_scan] if is_root else [agent_finish]
+    tools: list[Tool] = [*_BASE_TOOLS, *extra]
+    return [_wrap_arg_coercion(t) if isinstance(t, FunctionTool) else t for t in tools]
 
 
 def build_strix_agent(

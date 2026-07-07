@@ -44,6 +44,23 @@ class LlmSettings(BaseSettings):
     # request with its true limit, that limit is learned and applied automatically
     # (see strix.core.context_limit), so a value set too high self-corrects.
     context_window: int = Field(default=262144, alias="STRIX_LLM_CONTEXT_WINDOW")
+    # Headroom kept below the window for output tokens + estimate drift, as a
+    # fraction of the window (floored at 16_384 tokens for small windows). See
+    # strix.core.context_limit.ContextLimitFilter._budget.
+    reserve_ratio: float = Field(default=0.10, ge=0, lt=1, alias="STRIX_LLM_RESERVE_RATIO")
+    # Conservative bytes-per-token divisor used by the dependency-free token
+    # estimate (lower = more tokens assumed per byte = safer margin).
+    bytes_per_token: float = Field(default=3.5, gt=0, alias="STRIX_LLM_BYTES_PER_TOKEN")
+    # Fraction of the window at which an agent's stored session is compacted in
+    # place (oldest turns summarised into a pointer index). 0 disables compaction
+    # (fall back to outbound trimming only). See strix.core.compaction.
+    compaction_trigger_ratio: float = Field(
+        default=0.70, ge=0, lt=1, alias="STRIX_LLM_COMPACTION_TRIGGER_RATIO"
+    )
+    # Number of most-recent history items kept verbatim through a compaction.
+    compaction_keep_recent: int = Field(default=12, ge=0, alias="STRIX_LLM_COMPACTION_KEEP_RECENT")
+    # Model used to summarise the compacted span. Empty = reuse the run's model.
+    summarizer_model: str = Field(default="", alias="STRIX_LLM_SUMMARIZER_MODEL")
     max_retries: int = Field(default=5, ge=0, alias="STRIX_LLM_MAX_RETRIES")
     retry_initial_delay: float = Field(
         default=2.0,
@@ -52,6 +69,12 @@ class LlmSettings(BaseSettings):
     )
     retry_max_delay: float = Field(default=90.0, ge=0, alias="STRIX_LLM_RETRY_MAX_DELAY")
     retry_multiplier: float = Field(default=2.0, gt=0, alias="STRIX_LLM_RETRY_MULTIPLIER")
+    # Cap on concurrent in-flight LLM requests across the whole scan (root + all
+    # children + the QA reflection pass). 0 (or less) = unlimited, i.e. current
+    # behaviour. Set to N to bound a resource-limited backend (e.g. a local model
+    # served from one machine that can only run N generations at once). No ge=/gt=:
+    # any value <= 0 is the "disabled" sentinel handled by _llm_semaphore.
+    max_concurrency: int = Field(default=0, alias="STRIX_LLM_MAX_CONCURRENCY")
 
 
 class RuntimeSettings(BaseSettings):

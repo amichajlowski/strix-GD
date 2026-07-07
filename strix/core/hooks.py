@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from agents.lifecycle import RunHooks
 
 from strix.core import reflection
+from strix.core.compaction import maybe_compact_session
 from strix.report.state import get_global_report_state
 
 
@@ -28,13 +29,20 @@ class BudgetExceededError(RuntimeError):
 class ReportUsageHooks(RunHooks[dict[str, Any]]):
     """Persist SDK-native usage after every model response."""
 
-    def __init__(self, *, model: str, max_budget_usd: float | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        model: str,
+        max_budget_usd: float | None = None,
+        context_filter: Any = None,
+    ) -> None:
         if max_budget_usd is not None and (
             not math.isfinite(max_budget_usd) or max_budget_usd <= 0
         ):
             raise ValueError("max_budget_usd must be a finite number greater than 0")
         self._model = model
         self._max_budget_usd = max_budget_usd
+        self._context_filter = context_filter
 
     async def on_llm_end(
         self,
@@ -70,6 +78,34 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
                 raise BudgetExceededError(
                     f"Token budget of ${self._max_budget_usd:.2f} exceeded (spent ${cost:.4f})"
                 )
+
+        await self._maybe_compact(ctx, agent_id)
+
+    async def _maybe_compact(self, ctx: dict[str, Any], agent_id: str) -> None:
+        """Proactively compact this agent's session between turns.
+
+        Runs on the inline ``on_llm_end`` path, so the agent's own run loop is
+        suspended awaiting this hook — mutating only *this* agent's session is
+        safe. Exception-isolated: a compaction failure must never break the turn.
+        """
+        if self._context_filter is None:
+            return
+        coordinator = ctx.get("coordinator")
+        session = None
+        runtimes = getattr(coordinator, "runtimes", None)
+        if isinstance(runtimes, dict):
+            runtime = runtimes.get(agent_id)
+            session = getattr(runtime, "session", None)
+        if session is None:
+            return
+        try:
+            compacted = await maybe_compact_session(
+                session, context_filter=self._context_filter, coordinator=coordinator
+            )
+            if compacted:
+                logger.info("Proactively compacted session for agent %s", agent_id)
+        except Exception:
+            logger.exception("proactive compaction failed for agent %s", agent_id)
 
     async def on_agent_end(
         self,
