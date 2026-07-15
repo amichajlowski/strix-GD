@@ -54,31 +54,42 @@ def apply_config_override(path: Path) -> None:
 
 
 def persist_current() -> None:
-    """Write the resolved settings to the active config file (0o600).
+    """Write the currently-configured env vars to the active config file (0o600).
 
-    Reads values off the resolved ``Settings`` object rather than ``os.environ``.
-    A field can be resolved purely from the JSON file (e.g. ``STRIX_LLM``) without
-    ever being mirrored back into the process environment, so checking os.environ
-    silently dropped it on the next persist. Using the resolved value instead makes
-    persistence round-trip correctly regardless of where the value came from.
+    A field's value is taken from ``os.environ`` if set there, otherwise from
+    whatever the file already persisted. Seeding from the existing file means a
+    value sourced only from the JSON config (never mirrored into the process
+    environment) survives a round-trip instead of being silently dropped; reading
+    ``os.environ`` first keeps a live override winning. Pydantic defaults appear in
+    neither source, so they are not frozen into the file. Each value is written
+    under the field's canonical (first) alias.
     """
     s = load_settings()
     target = _override or _DEFAULT_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
+
+    prior: dict[str, str] = {}
+    if target.exists():
+        with contextlib.suppress(json.JSONDecodeError, OSError):
+            data = json.loads(target.read_text(encoding="utf-8"))
+            raw = data.get("env", {}) if isinstance(data, dict) else {}
+            if isinstance(raw, dict):
+                prior = {str(k).upper(): str(v) for k, v in raw.items()}
 
     env_block: dict[str, str] = {}
     for sub_name in s.model_fields:
         sub_model = getattr(s, sub_name)
         if not isinstance(sub_model, BaseModel):
             continue
-        for fname, finfo in type(sub_model).model_fields.items():
-            value = getattr(sub_model, fname, None)
-            if value in (None, ""):
-                continue
+        for finfo in type(sub_model).model_fields.values():
             aliases = _aliases_for(finfo)
             if not aliases:
                 continue
-            env_block[aliases[0].upper()] = str(value)
+            for alias in aliases:
+                value = os.environ.get(alias.upper()) or prior.get(alias.upper())
+                if value:
+                    env_block[aliases[0].upper()] = value
+                    break
 
     target.write_text(json.dumps({"env": env_block}, indent=2), encoding="utf-8")
     with contextlib.suppress(OSError):
@@ -115,6 +126,7 @@ def _read_json_overrides(path: Path) -> dict[str, dict[str, Any]]:
         return {}
 
     env_block_upper = {str(k).upper(): v for k, v in env_block.items()}
+    env_present = {k.upper() for k in os.environ}
 
     nested: dict[str, dict[str, Any]] = {}
     for sub_name, sub_finfo in Settings.model_fields.items():
@@ -123,12 +135,12 @@ def _read_json_overrides(path: Path) -> dict[str, dict[str, Any]]:
             continue
         sub_data: dict[str, Any] = {}
         for fname, finfo in sub_cls.model_fields.items():
-            for alias in _aliases_for(finfo):
-                key = alias.upper()
-                if key in os.environ:
-                    break  # env wins; skip JSON for this field
-                if key in env_block_upper:
-                    sub_data[fname] = env_block_upper[key]
+            aliases = [alias.upper() for alias in _aliases_for(finfo)]
+            if any(alias in env_present for alias in aliases):
+                continue  # env wins under some alias; skip the JSON file for this field
+            for alias in aliases:
+                if alias in env_block_upper:
+                    sub_data[fname] = env_block_upper[alias]
                     break
         if sub_data:
             nested[sub_name] = sub_data

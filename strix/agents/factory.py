@@ -52,7 +52,7 @@ from strix.tools.proxy.tools import (
     view_sitemap_entry,
 )
 from strix.tools.qa_loop.tool import review_before_finish
-from strix.tools.reporting.tool import create_vulnerability_report
+from strix.tools.reporting.tool import create_dependency_report, create_vulnerability_report
 from strix.tools.target_profile.tools import (
     get_target_profile,
     set_target_profile,
@@ -70,7 +70,7 @@ from strix.tools.web_search.tool import web_search
 
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
 
     from agents import RunContextWrapper
     from agents.tool import FunctionToolResult
@@ -335,6 +335,13 @@ def _wrap_exec_command(tool: FunctionTool) -> FunctionTool:
 
     async def invoke(ctx: Any, raw_input: str) -> Any:
         try:
+            parsed = json.loads(raw_input)
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict) and "shell" not in parsed:
+            parsed["shell"] = "bash"
+            raw_input = json.dumps(parsed)
+        try:
             return await invoke_tool(ctx, raw_input)
         except ValidationError as exc:
             return _format_validation_error(tool.name, exc)
@@ -460,6 +467,7 @@ _BASE_TOOLS: tuple[Tool, ...] = (
     delete_note,
     web_search,
     create_vulnerability_report,
+    create_dependency_report,
     list_requests,
     view_request,
     repeat_request,
@@ -484,10 +492,66 @@ _BASE_TOOLS: tuple[Tool, ...] = (
 )
 
 
-def select_tools(*, is_root: bool) -> list[Tool]:
-    """Root/child tool selection. Only root agents get the QA review + finish gate."""
-    extra = [review_before_finish, finish_scan] if is_root else [agent_finish]
-    tools: list[Tool] = [*_BASE_TOOLS, *extra]
+# Extra tools registered for scan agents. Mirrors
+# ``strix.runtime.backends.register_backend``: register before the first
+# ``build_strix_agent`` call and every agent (root + children) gets them.
+_EXTRA_TOOLS: list[Tool] = []
+
+
+def _ensure_unique_tool_names(tools: Sequence[Tool]) -> None:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for tool in tools:
+        if tool.name in seen:
+            duplicates.add(tool.name)
+        seen.add(tool.name)
+    if duplicates:
+        msg = f"Agent tools must have unique names: {sorted(duplicates)}"
+        raise ValueError(msg)
+
+
+def register_agent_tools(*tools: Tool) -> None:
+    """Register tools for every scan agent built afterwards.
+
+    Tools are added to both root and child agents, after the base set and
+    before the lifecycle tool (``finish_scan`` / ``agent_finish``). Duplicate
+    tool objects are ignored so repeated imports don't double-register.
+    """
+    new_tools: list[Tool] = []
+    for tool in tools:
+        if tool not in _EXTRA_TOOLS and tool not in new_tools:
+            new_tools.append(tool)
+
+    _ensure_unique_tool_names([*_BASE_TOOLS, *_EXTRA_TOOLS, *new_tools, finish_scan, agent_finish])
+
+    for tool in new_tools:
+        _EXTRA_TOOLS.append(tool)
+        logger.info("Registered extra agent tool: %s", getattr(tool, "name", tool))
+
+
+def registered_agent_tools() -> tuple[Tool, ...]:
+    """Return the currently registered scan-agent tools."""
+    return tuple(_EXTRA_TOOLS)
+
+
+def select_tools(*, is_root: bool, extra_tools: Sequence[Tool] | None = None) -> list[Tool]:
+    """Assemble the tool set for a scan agent and return it ready to attach.
+
+    Base tools + tools registered via ``register_agent_tools`` + this agent's
+    ``extra_tools`` + the lifecycle tool. Root agents also get the QA review gate
+    (``review_before_finish``) ahead of ``finish_scan``; children get
+    ``agent_finish``. Every ``FunctionTool`` is wrapped for arg coercion so weak
+    function-calling models can't crash the agent with malformed / stringified
+    args. Single source of truth shared by ``build_strix_agent`` and the tests.
+    """
+    agent_tools = [*_EXTRA_TOOLS, *(extra_tools or [])]
+    if is_root:
+        # review_before_finish is the root QA gate; keep registered extras
+        # immediately before the finish tool, matching register_agent_tools' contract.
+        tools: list[Tool] = [*_BASE_TOOLS, review_before_finish, *agent_tools, finish_scan]
+    else:
+        tools = [*_BASE_TOOLS, *agent_tools, agent_finish]
+    _ensure_unique_tool_names(tools)
     return [_wrap_arg_coercion(t) if isinstance(t, FunctionTool) else t for t in tools]
 
 
@@ -501,23 +565,32 @@ def build_strix_agent(
     interactive: bool = False,
     chat_completions_tools: bool = False,
     system_prompt_context: dict[str, Any] | None = None,
+    extra_tools: Sequence[Tool] | None = None,
+    instructions_override: str | None = None,
 ) -> SandboxAgent[Any]:
     """Build a SandboxAgent for either root or child use.
 
     Args:
         chat_completions_tools: Wrap SDK custom tools as function tools
             when the selected backend cannot accept Responses custom tools.
+        extra_tools: Additional tools for this scan agent only, on top of any
+            registered via ``register_agent_tools``.
+        instructions_override: Use this verbatim as the system prompt instead
+            of rendering the built-in scan prompt.
     """
-    instructions = render_system_prompt(
-        skills=skills,
-        scan_mode=scan_mode,
-        is_whitebox=is_whitebox,
-        is_root=is_root,
-        interactive=interactive,
-        system_prompt_context=system_prompt_context,
-    )
+    if instructions_override is not None:
+        instructions = instructions_override
+    else:
+        instructions = render_system_prompt(
+            skills=skills,
+            scan_mode=scan_mode,
+            is_whitebox=is_whitebox,
+            is_root=is_root,
+            interactive=interactive,
+            system_prompt_context=system_prompt_context,
+        )
 
-    tools: list[Tool] = select_tools(is_root=is_root)
+    tools = select_tools(is_root=is_root, extra_tools=extra_tools)
 
     logger.info(
         "Built %s agent '%s' (skills=%d, tools=%d, scan_mode=%s, whitebox=%s)",
