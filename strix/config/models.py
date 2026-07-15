@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from typing import TYPE_CHECKING, Any
 from weakref import WeakKeyDictionary
 
@@ -15,6 +16,8 @@ from agents.models.multi_provider import MultiProvider
 from agents.retry import (
     ModelRetryBackoffSettings,
     ModelRetrySettings,
+    RetryDecision,
+    RetryPolicyContext,
     retry_policies,
 )
 
@@ -108,6 +111,33 @@ class StrixProvider(MultiProvider):
         return _ConcurrencyLimitedModel(model, semaphore)
 
 
+# OpenAI's Responses/Chat streaming path raises the mid-stream rate-limit as a
+# bare ``openai.APIError`` (see openai/_streaming.py) with NO ``status_code`` —
+# so http_status((429,...)) and provider_suggested() both miss it and the agent
+# is killed instead of backing off. Match it by message and honour the
+# provider's "try again in Xs" hint.
+_RATE_LIMIT_SIGNATURE = re.compile(r"rate limit reached|tokens per min|requests per min", re.I)
+_TRY_AGAIN_DELAY = re.compile(r"try again in\s+([\d.]+)\s*(ms|s)", re.I)
+
+
+def _parse_retry_delay(message: str) -> float | None:
+    m = _TRY_AGAIN_DELAY.search(message)
+    if not m:
+        return None
+    value = float(m.group(1))
+    return value / 1000 if m.group(2).lower() == "ms" else value
+
+
+def retry_in_stream_rate_limit(context: RetryPolicyContext) -> bool | RetryDecision:
+    """Retry mid-stream rate-limit errors that carry no HTTP status code."""
+    if context.normalized.status_code is not None:
+        return False  # a real HTTP status: leave it to http_status()/provider_suggested()
+    message = str(context.error)
+    if not _RATE_LIMIT_SIGNATURE.search(message):
+        return False
+    return RetryDecision(retry=True, delay=_parse_retry_delay(message))
+
+
 def _build_model_retry_settings(
     *,
     max_retries: int,
@@ -127,6 +157,7 @@ def _build_model_retry_settings(
             retry_policies.provider_suggested(),
             retry_policies.network_error(),
             retry_policies.http_status((429, 500, 502, 503, 504)),
+            retry_in_stream_rate_limit,
         ),
     )
 

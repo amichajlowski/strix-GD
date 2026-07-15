@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from itertools import pairwise
 from typing import Any
 
@@ -71,6 +72,22 @@ def test_child_initial_input_bounds_oversized_parent_history() -> None:
     # Task + identity survive the trim.
     assert "Audit the login flow." in result[0]["content"]
     assert "Maintain your own identity" in result[0]["content"]
+
+
+def test_child_initial_input_keeps_small_parent_history_intact() -> None:
+    # A history under the token cap is a trim no-op and must round-trip verbatim,
+    # not get mangled by the bound.
+    parent_history = [
+        {"role": "user", "content": "short task"},
+        {"role": "assistant", "content": "ok"},
+    ]
+    result = child_initial_input(**_child_kwargs(parent_history))
+
+    content = result[0]["content"]
+    header = "== Inherited context from parent (background only) ==\n"
+    assert content.startswith(header)
+    rendered = content.split("\n== End of inherited context ==", 1)[0][len(header) :]
+    assert json.loads(rendered) == parent_history
 
 
 def test_build_root_task_empty_config() -> None:
