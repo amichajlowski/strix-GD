@@ -5,6 +5,7 @@ Strix Agent Interface
 
 import argparse
 import asyncio
+import contextlib
 import shutil
 import sys
 from datetime import UTC, datetime
@@ -874,7 +875,34 @@ def pull_docker_image() -> None:
     console.print()
 
 
+_FD_SOFT_MINIMUM = 8192
+
+
+def _raise_fd_limit(minimum: int = _FD_SOFT_MINIMUM) -> None:
+    """Raise this process's soft open-file limit to at least ``minimum``.
+
+    macOS defaults ``RLIMIT_NOFILE`` to 256; the FD-heavy TUI + Docker client +
+    LLM stack exhausts that (especially on ``--resume``), crashing with
+    ``OSError: [Errno 24] Too many open files``. Best-effort: never lowers the
+    limit, never exceeds the hard cap, and never raises — on failure or on
+    platforms without ``resource`` (Windows), the process keeps its old limit.
+    """
+    try:
+        import resource
+    except ImportError:
+        return
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft == resource.RLIM_INFINITY or soft >= minimum:
+        return
+    target = minimum if hard == resource.RLIM_INFINITY else min(hard, minimum)
+    if target > soft:
+        with contextlib.suppress(ValueError, OSError):
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+
+
 def main() -> None:
+    _raise_fd_limit()
     configure_dependency_logging()
 
     if sys.platform == "win32":
